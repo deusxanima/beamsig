@@ -30,6 +30,16 @@
     return e;
   }
 
+  // The robot is a recognition aid seeded by the beam UUID: the same beam
+  // always looks the same. It is decoration, not evidence, and is omitted
+  // rather than breaking the panel if the generator is unavailable.
+  function avatar(beamId, size, cls) {
+    if (!ns.avatar || !beamId) return document.createDocumentFragment();
+    const a = ns.avatar.avatarElement(beamId, size);
+    if (cls) a.classList.add(cls);
+    return a;
+  }
+
   function row(label, value, note, tier) {
     const r = el("div", "beamsig-row");
     r.appendChild(el("span", "beamsig-label", label));
@@ -52,6 +62,7 @@
     const box = el("div", "beamsig-panel beamsig-ok");
 
     const head = el("div", "beamsig-head");
+    head.appendChild(avatar(att.beamId, 40, "beamsig-avatar-lg"));
     head.appendChild(el("span", "beamsig-check", "✓"));
     const headText = el("div", "beamsig-head-text");
     headText.appendChild(
@@ -191,6 +202,7 @@
 
   function badge(att) {
     const b = el("span", "beamsig-badge beamsig-badge-ok");
+    b.appendChild(avatar(att.beamId, 14, "beamsig-avatar-sm"));
     b.appendChild(el("span", "beamsig-badge-check", "✓"));
     b.appendChild(el("span", "beamsig-badge-text", `beam ${SHORT(att.beamId)}`));
     b.title =

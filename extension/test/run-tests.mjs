@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
 const lib = join(here, "..", "src", "lib");
 
-for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js"]) {
+for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "avatar.js"]) {
   // eslint-disable-next-line no-eval
   eval(readFileSync(join(lib, f), "utf8"));
 }
@@ -333,6 +333,29 @@ ok(
   github.looksLikeSSHSig("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----") === false
 );
 ok("a null signature is handled", github.looksLikeSSHSig(null) === false);
+
+console.log("\navatar (JS port vs Python golden)");
+{
+  const { avatar } = globalThis.Beamsig;
+  const golden = JSON.parse(readFileSync(join(here, "avatar-golden.json"), "utf8"));
+  ok("version matches the Python", avatar.VERSION === golden.version, avatar.VERSION);
+  const bad = golden.cases.filter((c) => avatar.avatar(c.seed, 24) !== c.svg);
+  ok(
+    `${golden.cases.length} seeds render byte-identical SVG`,
+    bad.length === 0,
+    bad.length ? `first mismatch: ${JSON.stringify(bad[0].seed)}` : ""
+  );
+  const sha = avatar.sha256(new TextEncoder().encode("abc"));
+  ok(
+    "sync sha256 known-answer",
+    Buffer.from(sha).toString("hex") ===
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  );
+  ok(
+    "seed is trimmed and case-folded",
+    avatar.avatar("  JEFF@Example.com ") === avatar.avatar("jeff@example.com")
+  );
+}
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

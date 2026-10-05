@@ -151,7 +151,7 @@ signature data), so it is budgeted — 10 rows per page view by default.
 ```bash
 cd extension && npm install              # once; jsdom is a dev-only dependency
 npm test                                 # unit + jsdom end-to-end, no network, no browser
-node extension/test/run-tests.mjs        # 52 assertions, no network, no browser
+node extension/test/run-tests.mjs        # 56 assertions, no network, no browser
 node extension/test/e2e-jsdom.mjs        # content script in jsdom, mocked GitHub API
 node extension/test/verify-live.mjs      # real commits via the GitHub API
 node extension/test/chrome-check.mjs     # real page in Chrome; checks the anchor
@@ -247,11 +247,14 @@ node extension/test/make-preview-data.mjs
 | `src/lib/sshcrypto.js` | WebCrypto verification; mpint→`r‖s` and RSA→SPKI DER |
 | `src/lib/ca.js` | the pinned Teleport user CA, by value |
 | `src/lib/verify.js` | the beam-aware policy — port of `beamsig/verify.py` |
+| `src/lib/avatar.js` | deterministic robot avatar seeded by beam UUID — JS port of `tools/avatar/teleport_avatar.py` |
 | `src/github.js` | page routing, API fetch, cache, committer-date extraction |
 | `src/ui.js` | panel and badge rendering, and the three-tier honesty rules |
 | `src/content.js` | orchestration, DOM anchoring, SPA navigation |
 | `src/content.css` | styling, following GitHub's own colour tokens |
 | `src/options.html`, `src/options.js` | token, extra CAs, list budget, cache |
+| `tools/avatar/` | Python source of truth for the robot generator, `contact_sheet.py` for tuning parts, `make-golden.py` |
+| `test/avatar-golden.json` | SVGs rendered by the Python; `run-tests.mjs` checks the JS port matches byte-for-byte |
 | `test/run-tests.mjs` | headless test suite |
 | `test/e2e-jsdom.mjs` | content script end-to-end in jsdom, mocked API |
 | `test/verify-live.mjs` | end-to-end against real commits via the GitHub API |
@@ -261,3 +264,15 @@ node extension/test/make-preview-data.mjs
 
 `src/lib/verify.js` is a port of `beamsig/verify.py` and the two need to stay in
 step; the checks are in the same order in both, with the same messages.
+
+## Beam avatars
+
+Each beam gets a generated robot (grey paneled body, coloured highlights), seeded
+by its UUID, shown in the panel header and in list badges so the same beam is
+recognisable at a glance. It is decoration only: it carries no information and
+attests to nothing.
+
+The Python in `tools/avatar/` is the source of truth; `src/lib/avatar.js` is a
+port. After changing a part or weight, bump `VERSION` in both (existing avatars
+reshuffle otherwise), run `python3 tools/avatar/make-golden.py`, and `npm test`.
+Preview every variant with `python3 tools/avatar/contact_sheet.py -o sheet.html`.
