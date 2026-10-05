@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
 const lib = join(here, "..", "src", "lib");
 
-for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "avatar.js"]) {
+for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "discover.js", "avatar.js"]) {
   // eslint-disable-next-line no-eval
   eval(readFileSync(join(lib, f), "utf8"));
 }
@@ -355,6 +355,79 @@ console.log("\navatar (JS port vs Python golden)");
     "seed is trimmed and case-folded",
     avatar.avatar("  JEFF@Example.com ") === avatar.avatar("jeff@example.com")
   );
+}
+
+console.log("\ndiscover: which clusters may be asked for a CA");
+{
+  const { discover } = globalThis.Beamsig;
+  const D = ["*.beams.sh"];
+  const yes = (h, d = D) => ok(`allowed: ${h}`, discover.allowed(h, d) === true);
+  const no = (h, d = D) => ok(`refused: ${JSON.stringify(h)}`, discover.allowed(h, d) === false);
+  yes("quiet-hat.beams.sh");
+  yes("jeff.beams.sh");
+  yes("a.b.beams.sh");
+  yes("quiet-hat.beams.sh", ["quiet-*.beams.sh"]);
+  yes("quiet-hat.beams.sh", ["quiet-hat.beams.sh"]);
+  yes("quiet-hat.beams.sh", ["  *.BEAMS.sh "]);
+  no("beams.sh"); // the apex is not a tenant
+  no("evilbeams.sh");
+  no("beams.sh.evil.com");
+  no("evil.com");
+  no("quiet-hat.beams.sh:8443");
+  no("user@quiet-hat.beams.sh");
+  no("quiet-hat.beams.sh/x");
+  no("https://quiet-hat.beams.sh");
+  no("Quiet-Hat.beams.sh"); // must already be lowercase
+  no("quiet-hat.beams.sh.");
+  no("a..beams.sh");
+  no("-x.beams.sh");
+  no("127.0.0.1");
+  no("");
+  no(undefined);
+  no("quiet-hat.beams.sh", []); // empty allowlist = discovery off
+  no("quiet-hat.beams.sh", [""]);
+  no("quiet-hat.beams.sh", ["example.com"]);
+  no("quiet-hat.beams.sh", ["*.corp.example"]);
+
+  const line = text("teleport-user-ca.txt").trim();
+  const ents = discover.parseExport(line + "\n", "jeff.beams.sh");
+  ok("export line parsed and marked discovered", ents.length === 1 && ents[0].discovered === true && ents[0].cluster === "jeff.beams.sh", JSON.stringify(ents));
+  ok("a line naming another cluster is dropped", discover.parseExport(line, "other.beams.sh").length === 0);
+  ok("junk yields no CAs", discover.parseExport("<html>nope</html>", "jeff.beams.sh").length === 0);
+  ok(
+    "export URL is https and on the asked host",
+    discover.exportUrl("quiet-hat.beams.sh") === "https://quiet-hat.beams.sh/webapi/auth/export?type=user"
+  );
+}
+
+console.log("\ndiscovered CA, and which cluster is authoritative");
+{
+  const { discover } = globalThis.Beamsig;
+  const ents = discover.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh");
+  const good = await verify.loadPinnedCAs(ents);
+  const att = await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), good, {
+    namespace: "git", claimedTime: INSIDE_WINDOW,
+  });
+  ok("verifies against a discovered CA", att.ok && att.caDiscovered === true);
+  ok("flagged as discovered, not chosen", att.warnings.some((w) => w.includes("discovered, not chosen")));
+  // Authoritative cluster = the one bound to the verifying CA, not the claim.
+  ok("cluster comes from the CA's label", att.cluster === "jeff.beams.sh" && att.clusterPinned && att.clusterClaimed === "jeff.beams.sh");
+  const other = await verify.loadPinnedCAs(
+    discover.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh").map((e) => ({ ...e, cluster: "other.beams.sh", discovered: false }))
+  );
+  const att2 = await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), other, {
+    namespace: "git", claimedTime: INSIDE_WINDOW,
+  });
+  ok("a disagreeing claim is not authoritative", att2.cluster === "other.beams.sh" && att2.clusterClaimed === "jeff.beams.sh");
+  ok("...and is surfaced as a warning, not a failure", att2.ok && att2.warnings.some((w) => w.includes("treating")));
+  ok("an operator-pinned CA is not flagged as discovered", att2.caDiscovered === false);
+  // An untrusted-CA failure carries the (unauthenticated) cluster hint.
+  try {
+    await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), [{ ...cas[0], blob: new Uint8Array(cas[0].blob).reverse() }], {});
+    ok("untrusted CA throws", false);
+  } catch (e) {
+    ok("untrusted-ca error carries clusterHint", e.code === "untrusted-ca" && e.clusterHint === "jeff.beams.sh", `${e.code} ${e.clusterHint}`);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

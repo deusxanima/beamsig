@@ -22,17 +22,108 @@
 
   // ---- trust anchors --------------------------------------------------------
 
+  // Shipped pins, then the user's extra CAs, then CAs discovered earlier and
+  // pinned on first use (see lib/discover.js). Order does not matter for
+  // verification; it is only the set that counts.
   let casPromise = null;
+
+  async function storedDiscoveredPins() {
+    try {
+      const all = await chrome.storage.local.get(null);
+      return Object.entries(all)
+        .filter(([k]) => k.startsWith(ns.discover.PIN_PREFIX))
+        .flatMap(([k, v]) =>
+          ns.discover.parseExport(v.text, k.slice(ns.discover.PIN_PREFIX.length))
+        );
+    } catch (e) {
+      return []; // no storage (e.g. console bundle): nothing was ever pinned
+    }
+  }
 
   function loadCAs(settings) {
     if (!casPromise) {
       const extra = (settings.extraCAs || []).map((e) => ({ ...e, userAdded: true }));
-      casPromise = verify.loadPinnedCAs([...ca.PINNED_CAS, ...extra]).catch((e) => {
-        casPromise = null;
-        throw e;
-      });
+      casPromise = storedDiscoveredPins()
+        .then((pins) => verify.loadPinnedCAs([...ca.PINNED_CAS, ...extra, ...pins]))
+        .catch((e) => {
+          casPromise = null;
+          throw e;
+        });
     }
     return casPromise;
+  }
+
+  // ---- discovery ------------------------------------------------------------
+
+  // Fenced (allowlist, TOFU pin): see lib/discover.js, and beamsig/discover.py which it
+  // mirrors. Only reached when no known CA matched AND the certificate names a
+  // cluster on the user's allowlist.
+  class DiscoveryRefused extends Error {}
+
+  const discovering = new Map(); // cluster -> Promise<CAs>, so rows share one fetch
+
+  function askBackground(cluster) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage({ type: "beamsig:fetch-ca", cluster }, (res) => {
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!res || !res.ok) return reject(new Error((res && res.error) || "no answer"));
+          resolve(res.text);
+        });
+      } catch (e) {
+        reject(e); // e.g. no extension context (console bundle)
+      }
+    });
+  }
+
+  function discoverCluster(cluster, settings) {
+    const patterns = settings.discoverAllow || [];
+    if (!patterns.length) {
+      throw new DiscoveryRefused(
+        "discovery is turned off (the discovery allowlist in the extension " +
+          "options is empty)"
+      );
+    }
+    if (!ns.discover.allowed(cluster, patterns)) {
+      throw new DiscoveryRefused(
+        `cluster ${cluster} is not covered by the discovery allowlist ` +
+          `[${patterns.join(", ")}]; add its CA in the extension options if you mean to trust it`
+      );
+    }
+    if (!discovering.has(cluster)) {
+      const key = ns.discover.PIN_PREFIX + cluster;
+      const p = (async () => {
+        let existing = null;
+        try {
+          existing = (await chrome.storage.local.get(key))[key];
+        } catch (e) { /* no storage: nothing is pinned */ }
+        if (existing) {
+          // Already pinned and it did not verify this certificate, so the
+          // cluster's CA changed (rotation) or something is wrong. Never
+          // silently overwrite a pin.
+          throw new DiscoveryRefused(
+            `a pin for ${cluster} already exists but did not verify this ` +
+              "certificate. The cluster's user CA may have been rotated; confirm " +
+              "the new fingerprint out of band, then forget the discovered CA in " +
+              "the extension options"
+          );
+        }
+        const text = await askBackground(cluster);
+        const entries = ns.discover.parseExport(text, cluster);
+        if (!entries.length) throw new Error(`no CA found in ${cluster}'s export`);
+        const cas = await verify.loadPinnedCAs(entries);
+        try {
+          await chrome.storage.local.set({ [key]: { text, fetchedAt: Date.now() } });
+        } catch (e) { /* not fatal: it will be rediscovered next time */ }
+        casPromise = null; // so the new pin is part of the known set from now on
+        return cas;
+      })();
+      // Failures are not remembered (a transient network error must not stick);
+      // a success is, so concurrent rows from one tenant share the result.
+      p.catch(() => discovering.delete(cluster));
+      discovering.set(cluster, p);
+    }
+    return discovering.get(cluster);
   }
 
   // ---- verification ---------------------------------------------------------
@@ -61,20 +152,53 @@
     const cas = await loadCAs(settings);
     const payloadBytes = ns.wire.TE.encode(record.payload || "");
     const ct = github.committerTime(record.payload || "");
-
-    try {
-      const att = await verify.verifySSHSig(record.signature, payloadBytes, cas, {
+    const attempt = (list) =>
+      verify.verifySSHSig(record.signature, payloadBytes, list, {
         namespace: "git",
         claimedTime: ct ? ct.timestamp : undefined,
         claimedTimeSource: "git committer date",
       });
-      return { state: "verified", att, record };
-    } catch (e) {
+
+    const classify = (e) => {
       const msg = e.message || String(e);
       // Distinguish "this is somebody else's signature, which is fine" from
       // "this looks like a beam signature and something is wrong".
-      const notOurs = verify.NOT_BEAM_CODES.has(e.code);
-      return { state: notOurs ? "notbeam" : "failed", message: msg, record };
+      return { state: verify.NOT_BEAM_CODES.has(e.code) ? "notbeam" : "failed", message: msg, record };
+    };
+
+    try {
+      return { state: "verified", att: await attempt(cas), record };
+    } catch (e) {
+      // Only an unknown CA can be helped by discovery, and the cluster named
+      // by the certificate is merely where to ask: the unauthenticated claim.
+      const cluster = e.code === "untrusted-ca" ? e.clusterHint : "";
+      if (!cluster) return classify(e);
+
+      let found;
+      try {
+        found = await discoverCluster(cluster, settings);
+      } catch (de) {
+        log("discovery not done", cluster, de.message);
+        const r = classify(e);
+        r.message += ` (discovery not attempted: ${de.message})`;
+        if (!(de instanceof DiscoveryRefused)) r.message = r.message.replace("not attempted", "failed");
+        return r;
+      }
+      try {
+        return { state: "verified", att: await attempt(found), record };
+      } catch (e2) {
+        if (e2.code === "untrusted-ca") {
+          // It claims a cluster we were allowed to ask, but that cluster's CA
+          // did not sign it. That is not "someone else's signature": it is a
+          // false claim.
+          return {
+            state: "failed",
+            message: `certificate claims cluster ${cluster} but is not signed by its CA`,
+            record,
+          };
+        }
+        return classify(e2);
+      }
     }
   }
 

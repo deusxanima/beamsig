@@ -85,10 +85,22 @@
       row("bot instance", att.botInstanceId, "stable per beam boot", "attested")
     );
     a.appendChild(row("delegation session", att.delegationSessionId, "", "attested"));
-    a.appendChild(row("cluster", att.cluster, "", "attested"));
+    a.appendChild(
+      row(
+        "cluster",
+        att.cluster,
+        att.clusterPinned ? "bound to the CA that verified this" : "from the certificate, unpinned",
+        att.clusterPinned ? "attested" : "selfreported"
+      )
+    );
+    if (att.clusterClaimed && att.clusterClaimed !== att.cluster) {
+      a.appendChild(
+        row("cluster claimed", att.clusterClaimed, "what the certificate says — NOT authoritative", "selfreported")
+      );
+    }
     a.appendChild(row("roles at issuance", att.roles.join(", "), "", "attested"));
     a.appendChild(
-      row("principals", att.principals.join(", "), "generic logins, shared cluster-wide")
+      row("principals", att.principals.join(", "), "generic logins, shared cluster-wide", "attested")
     );
     if (att.loginIp) a.appendChild(row("login ip", att.loginIp, "", "attested"));
     box.appendChild(a);
@@ -131,7 +143,14 @@
     const c = section("Crypto");
     c.appendChild(row("signing key", att.signingKeyFp, "constant for the beam's life", "attested"));
     c.appendChild(
-      row("issuing CA", att.caFp, `pinned${att.caCluster ? ` · ${att.caCluster}` : ""}`, "attested")
+      row(
+        "issuing CA",
+        att.caFp,
+        att.caDiscovered
+          ? `discovered from ${att.caCluster} · pinned on first use · NOT operator-pinned`
+          : `pinned${att.caCluster ? ` · ${att.caCluster}` : ""}`,
+        att.caDiscovered ? "selfreported" : "attested"
+      )
     );
     c.appendChild(row("algorithm", att.sigAlgorithm, "", "attested"));
     c.appendChild(row("payload sha256", SHORT(att.payloadSha256), "", "attested"));

@@ -49,6 +49,102 @@ carrying a *forged* `bot-name`, because it never reads that extension.
 `bot-name@goteleport.com` to match `beam-<uuid>`, and checks the claimed time
 against the certificate window.
 
+## Trust is per tenant, not baked in
+
+Nothing here is wired to one Teleport cluster. The trust anchor is discovered
+at install time from `$TELEPORT_CLUSTER` and pinned into a store of
+cluster-labelled files:
+
+```
+~/.config/beamsig/trusted/<cluster>.ca
+```
+
+To verify beams from another tenant, add its CA — then both verify from the
+same store:
+
+```bash
+./bin/beamsig trust other-tenant.teleport.sh      # fetch and pin
+./bin/beamsig trust --list
+./bin/install-global.sh --trust other-tenant.teleport.sh
+```
+
+**The authoritative cluster comes from the pin, never from the certificate.**
+A certificate's `teleport-route-to-cluster` extension is only a claim made by
+whoever signed it, so once two tenants are trusted, either could mint a
+certificate claiming to be the other. `beamsig` reports the cluster that the
+*verifying CA* is pinned for, and flags a disagreeing claim as not
+authoritative:
+
+```
+teleport cluster     : other-tenant.example.sh
+cluster claimed      : jeff.beams.sh   (NOT authoritative)
+! certificate claims cluster 'jeff.beams.sh' but was signed by the CA pinned
+  for 'other-tenant.example.sh'; treating 'other-tenant.example.sh' as authoritative
+```
+
+`--cluster <name>` scopes a verification to one tenant and fails otherwise.
+`bin/multitenant-tests.sh` exercises this, including the spoofing case.
+
+Two consequences worth knowing. A beam's identity is really the pair
+*(cluster, beam id)* — `--beam-id` alone is under-specified across tenants, so
+pass `--cluster` too when it matters. And an **unlabelled** pin cannot vouch for
+a cluster name: beamsig falls back to the certificate's claim and says so
+loudly, which is why the store uses `<cluster>.ca` filenames.
+
+Stock `ssh-keygen` cannot do any of this: `allowed_signers` has no way to say
+which cluster a `cert-authority` line belongs to, so with several tenants
+listed it cannot tell them apart.
+
+## Commits from several tenants in one repository
+
+This works, and it is worth knowing exactly what you see. A commit whose
+issuing CA is not pinned is reported as `%G?` = **`U`** — *good signature,
+unknown trust* — not `B`. Nothing is wrong with the bytes; there is simply no
+basis for trusting the tenant. Stock `ssh-keygen` says only
+`No principal matched.`, so `beamsig` explains it instead:
+
+```
+Good "git" signature with ECDSA-CERT key SHA256:qoOp6kLYO6Fq3b3H2pihOAxceLdem6G04adObAuSdmk
+UNTRUSTED TENANT: the signature is intact, but its Teleport CA is not pinned here.
+  claims cluster  other.example.sh  (unverified: this comes from the certificate itself)
+  claims beam     5d41402a-bc4b-2a76-b971-9d911017c592  (unverified)
+  issuing CA      SHA256:48TyCfGeffUJFJ8EF60O5RtCnnoFQ8oanLMqS3xy/rU
+  to trust it     beamsig trust other.example.sh
+```
+
+`beamsig verify*` exits **3** for an untrusted tenant, distinct from **2** for
+an invalid signature, so CI and UIs can tell "we don't know them" from "this is
+broken".
+
+### Lazy loading, and why it is off by default
+
+A CA *can* be fetched on demand, because the certificate names the cluster it
+came from. But that name comes from the artifact being verified, so fetching a
+trust anchor it names is circular: anyone can mint their own CA and a
+certificate claiming `teleport-route-to-cluster=evil.example.com`, and
+discovery would dutifully fetch evil.example.com's CA and validate it. The
+result shows the signer controls a Teleport cluster at that hostname — it is
+**not** the same statement as a pin an operator chose.
+
+So discovery is opt-in and fenced:
+
+```bash
+beamsig verify-commit <sha> --discover-allow '*.beams.sh'
+export BEAMSIG_DISCOVER_ALLOW='*.beams.sh,*.corp.example'
+```
+
+* off unless an allowlist is given — no allowlist, no fetch;
+* the cluster name must match a glob *and* be a syntactically valid hostname;
+* trust-on-first-use: the CA is written to the store and pinned from then on;
+* an existing pin is **never** silently overwritten — a changed CA is reported,
+  not accepted;
+* the first use is reported as unauthenticated, with the fingerprint to confirm
+  out of band.
+
+For a team whose tenants are all its own, `--discover-allow '*.yourdomain'` is
+reasonable. Otherwise pin deliberately with `beamsig trust <cluster>`. See
+`beamsig/discover.py`.
+
 ## Biggest caveat
 
 The beam key **never rotates** — only the certificate does, every 20 minutes,
@@ -61,6 +157,34 @@ external timestamp (RFC 3161) or a server-side audit anchor; see REPORT.md §4(c
 and §6.3.
 
 ## Setup
+
+### Onto a Beam, from a machine with this checkout
+
+Run after logging in to your Beams cluster with `tsh`:
+
+```bash
+./main.sh                        # create a new Beam, then set up beamsig
+./main.sh daring-lab             # set up an existing Beam (name or UUID)
+./main.sh daring-lab --uninstall
+./main.sh --help
+```
+
+`main.sh` packs the tree, copies it plus `setup-beamsig.sh` with
+`tsh beams scp`, and runs the setup over `tsh beams exec`. The target Beam needs
+**no git remote credentials and clones nothing** — it only reaches its own
+cluster for the public CA export. The payload is ~82 KB; the virtualenv is built
+on the Beam rather than shipped. A newly created Beam can be listed before its
+SSH node registers, so it waits for SSH before copying anything.
+
+It packs from an allowlist (`git ls-files --cached --others --exclude-standard`),
+so local uncommitted edits travel but anything `.gitignore`d stays behind. That
+is deliberate: `.gitignore` hides the throwaway private keys the negative tests
+mint under `exp5/` and the archived copies of the identity file.
+
+Nothing outlives the Beam. `setup-beamsig.sh --uninstall` removes the install
+directory, `~/.config/beamsig` and the git config keys.
+
+### In place, on the machine you are already on
 
 ```bash
 sudo apt-get install -y python3-venv      # if needed
@@ -143,6 +267,8 @@ word `Good` on a line *before* failing, so never grep for it.
 | Path | What |
 |---|---|
 | `REPORT.md` | the findings write-up — start here |
+| `main.sh` | install onto a Beam over `tsh beams scp` / `exec` (no git access needed there) |
+| `setup-beamsig.sh` | runs on the Beam; unpacks, builds, configures, smoke-tests |
 | `docs/PRESENTATION-NOTES.md` | hand-off note for a UI / presentation layer, incl. the GitHub userscript route |
 | `extension/` | browser extension: shows beam signatures on GitHub, which reports them `unverified` |
 | `docs/index.html` | landing page (GitHub Pages): what beamsig is, plus a verifier that runs in the browser |

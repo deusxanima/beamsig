@@ -68,9 +68,16 @@ beamsig verify-commit <sha> -C <repo> --ca <pinned-ca> --beam-id <uuid> --json
 }
 ```
 
-Exit code is the contract: `0` verified, `2` failed. `ok` is never `true` on a
-failure path. Also render `warnings[]` — it is where we put "this was not
-checked" rather than silently omitting it.
+Exit code is the contract: `0` verified, `2` invalid, **`3` untrusted tenant**.
+`ok` is never `true` on a failure path. Also render `warnings[]` — it is where
+we put "this was not checked" rather than silently omitting it.
+
+**Treat 3 as a third state, not an error.** A repository can hold commits from
+several Beams tenants, and one whose CA you have not pinned is *not* a bad
+signature — git itself reports `%G?` = `U`, good signature with unknown trust.
+Show it as "unknown tenant" with the cluster and beam it *claims* (both clearly
+unverified), not as tampering. stderr carries the claimed cluster and the
+command to pin it.
 
 The same tool does artifacts (`beamsig verify`) and multi-subject attestation
 bundles (`beamsig verify-attestation`), with the same JSON shape.
@@ -90,6 +97,27 @@ render time it is trusting the network, not the pin. The CA is long-lived
 response is *not* valid OpenSSH `allowed_signers` syntax — it is missing the
 leading principal field — so if you pass it to `ssh-keygen` you must prepend
 one. See `bin/make-allowed-signers.sh`.
+
+**Do not assume one tenant.** Keep a *map* of cluster → CA, not a single
+anchor, and key it by cluster so the UI can serve more than one Beams tenant.
+`beamsig` stores pins as `~/.config/beamsig/trusted/<cluster>.ca`; `beamsig
+trust <cluster>` adds one.
+
+**Take the cluster from the pin, never from the certificate.** This is a real
+spoofing vector, not a theoretical one. `teleport-route-to-cluster` is just a
+claim made by whoever signed the certificate, so if you trust two tenants,
+either can mint a certificate claiming to be the other. The JSON reflects this:
+
+| field | meaning |
+|---|---|
+| `cluster` | **authoritative** — the cluster the verifying pin is bound to |
+| `cluster_claimed` | what the certificate says; display only, may differ |
+| `cluster_pinned` | `false` means the pin was unlabelled and `cluster` fell back to the claim |
+
+Render `cluster`. If `cluster_pinned` is `false`, or `cluster_claimed` differs
+from `cluster`, say so — both land in `warnings[]` too. And treat a beam's
+identity as the pair *(cluster, beam_id)*; a beam id alone is not unique across
+tenants as far as a verifier can prove.
 
 ## Three things you must NOT claim
 

@@ -18,17 +18,13 @@ ca/
 archive/
 inventory/
 
-# Throwaway CA and user keys used by the negative tests. bin/negative-tests.sh
-# regenerates them on every run; never commit private keys, even test ones.
-exp5/
+# Throwaway CA and user keys minted by the test scripts. Globbed, not
+# enumerated: an explicit list missed exp-multitenant/ and staged its private
+# keys, which is the same mistake that once shipped exp5/ to a Beam. The test
+# scripts regenerate these on every run; never commit private keys, even
+# disposable ones.
+exp*/
 testkeys/
-
-# Scratch working directories for the experiments.
-exp2/
-exp6/
-exp6x/
-exp-attest/
-exp-backdate/
 
 # Nested git repositories created by the experiments.
 repos/

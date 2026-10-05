@@ -39,7 +39,9 @@ Configure per-repo with:
 or beam-wide with `bin/install-global.sh`.
 
 Environment:
-    BEAMSIG_CA          pinned Teleport SSH user CA (default <home>/ca/pinned-user-ca.txt)
+    BEAMSIG_TRUST_STORE directory of <cluster>.ca pins
+                        (default ~/.config/beamsig/trusted)
+    BEAMSIG_CA          single-file CA override
     BEAMSIG_SSH_KEYGEN  real ssh-keygen (default /usr/bin/ssh-keygen)
     BEAMSIG_ALIAS_MAP   optional "<uuid> <alias>" lines, shown but marked unverified
     BEAMSIG_PLAIN       set to 1 to disable colour
@@ -72,7 +74,27 @@ if not os.environ.get("_BEAMSIG_REEXEC"):
         sys.exit(1)
 
 REAL = os.environ.get("BEAMSIG_SSH_KEYGEN", "/usr/bin/ssh-keygen")
-CA = os.environ.get("BEAMSIG_CA", os.path.join(_HOME, "ca", "pinned-user-ca.txt"))
+
+# Trust is per tenant. Prefer a directory of cluster-labelled pins so that
+# commits from beams in other tenants verify once their CA is dropped in;
+# BEAMSIG_CA remains as a single-file override.
+_CFG = os.environ.get("BEAMSIG_CONFIG_DIR",
+                      os.path.expanduser("~/.config/beamsig"))
+TRUST_STORE = os.environ.get("BEAMSIG_TRUST_STORE",
+                             os.path.join(_CFG, "trusted"))
+CA_FILE = os.environ.get("BEAMSIG_CA", "")
+
+
+def trust_sources():
+    if CA_FILE:
+        return [CA_FILE]
+    if os.path.isdir(TRUST_STORE) and os.listdir(TRUST_STORE):
+        return [TRUST_STORE]
+    for fallback in (os.path.join(_CFG, "pinned-user-ca.txt"),
+                     os.path.join(_HOME, "ca", "pinned-user-ca.txt")):
+        if os.path.exists(fallback):
+            return [fallback]
+    return []
 
 BEAM_RE = re.compile(r"^beam-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -191,7 +213,8 @@ def do_verify(argv):
     try:
         from beamsig import verify as vmod
         att = vmod.verify_sshsig(
-            sig, payload, vmod.load_ca_blobs(CA), namespace="git",
+            sig, payload, vmod.load_trust_anchors(trust_sources()),
+            namespace="git",
             claimed_time=verify_time(argv),
             claimed_time_source="git commit date", require_beam=True)
     except Exception as e:
@@ -220,18 +243,60 @@ def do_verify(argv):
     print(f"  commit time   {iso(ct) if ct else '(unknown)'}"
           + ("  in window" if ct else ""))
     print(f"  signing key   {att.signing_key_fp}")
-    print(f"  teleport CA   {att.ca_fp}  ({att.cluster})")
+    cluster = att.cluster + ("" if att.cluster_pinned else " (unpinned)")
+    print(f"  cluster       {cluster}")
+    print(f"  teleport CA   {att.ca_fp}")
+    for w in att.warnings:
+        print("  " + c("33", "! " + w))
     if ct is None:
         print("  " + c("33", "! no commit time supplied; window not checked"))
     return 0
 
 
+def _is_beam_signingkey(path):
+    """Should we take over signing, or hand back to the real ssh-keygen?
+
+    Taking over unconditionally was wrong: installed globally, it hijacked
+    every signature in every repository, so a user could not sign with their
+    own key, and `user.signingkey` was silently ignored. Only claim the
+    signature when the configured key really is meant to be the beam.
+    """
+    if os.environ.get("BEAMSIG_FORCE_SIGN"):
+        return True
+    if not path:
+        return True
+    # A placeholder like `beam`, or a path we manage, or a path that no longer
+    # exists (a certificate file that rotated out from under git).
+    if not os.path.exists(path):
+        return True
+    cfg = os.path.realpath(os.environ.get(
+        "BEAMSIG_CONFIG_DIR", os.path.expanduser("~/.config/beamsig")))
+    try:
+        if os.path.realpath(path).startswith(cfg + os.sep):
+            return True
+    except Exception:
+        pass
+    # Or a file holding this beam's own certificate (possibly a stale one: the
+    # public key is stable even though the certificate is replaced).
+    try:
+        from beamsig import identity as ident_mod, sshcert
+        want = sshcert.parse_line(ident_mod.load().ssh_cert_line).pubkey_blob
+        with open(path, "rb") as f:
+            got = sshcert.parse_line(f.read()).pubkey_blob
+        return got == want
+    except Exception:
+        return False
+
+
 def do_sign(argv):
     """Sign with the CURRENT beam certificate, via the hardware key agent.
 
-    The -f value is deliberately ignored: a file written even 20 minutes ago
-    holds a superseded certificate, and offering it to the agent fails.
+    The -f value is ignored once we have decided this is a beam signature: a
+    file written even 20 minutes ago holds a superseded certificate, and
+    offering that to the agent fails with "agent refused operation".
     """
+    if not _is_beam_signingkey(opt_value(argv, "-f")):
+        os.execv(REAL, [REAL] + argv)   # not ours; let OpenSSH handle it
     namespace = opt_value(argv, "-n") or "git"
     # payload is the last positional argument
     positional = [a for i, a in enumerate(argv)
@@ -280,6 +345,106 @@ def _refresh_cert_cache():
         pass
 
 
+def do_check_novalidate(argv):
+    """Where a commit from another Beams tenant actually lands.
+
+    When `find-principals` finds no match -- which is what an unpinned CA looks
+    like -- git does not call `verify` at all. It calls `check-novalidate`,
+    which checks the signature without any notion of trust, and reports %G? as
+    U from the "Good ... signature with <key>" line. Passing that through
+    unchanged tells a reader nothing, so append which tenant and beam the
+    certificate claims, and how to trust it.
+    """
+    payload = sys.stdin.buffer.read()
+    sig_path = opt_value(argv, "-s")
+    rc, out = run_real(argv, stdin_data=payload)
+    sys.stdout.buffer.write(out)
+    if rc != 0:
+        return rc
+    try:
+        sig = read_sig(sig_path)
+    except Exception:
+        return rc
+    _explain_unknown_tenant(sig, payload, argv)
+    return rc
+
+
+def _explain_unknown_tenant(sig, payload, argv):
+    """Say who the certificate claims to be, clearly marked unverified."""
+    try:
+        from beamsig import verify as vmod
+        from beamsig import discover as disc_mod
+    except Exception:
+        return
+    unknown = None
+    try:
+        vmod.verify_sshsig(sig, payload, vmod.load_trust_anchors(trust_sources()),
+                           namespace="git", claimed_time=verify_time(argv),
+                           require_beam=True)
+        return                            # trusted after all; nothing to add
+    except vmod.UnknownTenant as exc:
+        unknown = exc                     # `except ... as e` unbinds e on exit
+    except Exception:
+        return
+    e = unknown
+    print(c("33", "UNTRUSTED TENANT: the signature is intact, but its "
+                  "Teleport CA is not pinned here."))
+    print(f"  claims cluster  {e.cluster_claimed or '(unstated)'}  "
+          + c("33", "(unverified: this comes from the certificate itself)"))
+    if e.beam_id:
+        print(f"  claims beam     {e.beam_id}  " + c("33", "(unverified)"))
+    print(f"  issuing CA      {e.ca_fp}")
+    patterns = disc_mod.allow_patterns()
+    if patterns and e.cluster_claimed:
+        try:
+            new = disc_mod.discover(e.cluster_claimed, TRUST_STORE, patterns)
+            print(c("33", f"  discovered and pinned {e.cluster_claimed} "
+                          f"({', '.join(a.fingerprint for a in new)}); "
+                          "re-run to verify it"))
+            return
+        except Exception as why:
+            print(c("33", f"  discovery not attempted: {why}"))
+    print(f"  to trust it     beamsig trust {e.cluster_claimed or '<cluster>'}")
+
+
+def _report_unknown_tenant(sig, payload, argv):
+    """Return True if this is an unpinned tenant and we have explained it."""
+    try:
+        from beamsig import verify as vmod
+        from beamsig import discover as disc_mod
+    except Exception:
+        return False
+    try:
+        vmod.verify_sshsig(sig, payload, vmod.load_trust_anchors(trust_sources()),
+                           namespace="git", claimed_time=verify_time(argv),
+                           require_beam=True)
+        return False                      # it verified after all
+    except vmod.UnknownTenant as e:
+        patterns = disc_mod.allow_patterns()
+        store = TRUST_STORE
+        if patterns:
+            try:
+                disc_mod.discover(e.cluster_claimed, store, patterns)
+                print(c("33", f'Discovered and pinned {e.cluster_claimed}; '
+                              're-run to verify.'))
+            except Exception as why:
+                print(c("33", f"Discovery not attempted: {why}"))
+        keytype = "ECDSA-CERT"
+        print(f'Good "git" signature with {keytype} key {e.signing_key_fp}')
+        print(c("33", "UNTRUSTED TENANT: this signature is intact, but its "
+                      "Teleport CA is not pinned here."))
+        print(f"  claims cluster  {e.cluster_claimed or '(unstated)'}  "
+              + c("33", "(unverified -- from the certificate)"))
+        if e.beam_id:
+            print(f"  claims beam     {e.beam_id}  "
+                  + c("33", "(unverified)"))
+        print(f"  issuing CA      {e.ca_fp}")
+        print(f"  to trust it     beamsig trust {e.cluster_claimed or '<cluster>'}")
+        return True
+    except Exception:
+        return False
+
+
 def main():
     argv = sys.argv[1:]
     if "-Y" in argv:
@@ -288,6 +453,8 @@ def main():
             return do_sign(argv)
         if mode == "find-principals":
             return do_find_principals(argv)
+        if mode == "check-novalidate":
+            return do_check_novalidate(argv)
         if mode == "verify":
             return do_verify(argv)
     # everything else: pass straight through

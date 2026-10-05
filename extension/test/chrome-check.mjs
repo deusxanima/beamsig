@@ -35,6 +35,7 @@ const SCRIPTS = [
   "src/lib/sshcrypto.js",
   "src/lib/ca.js",
   "src/lib/verify.js",
+  "src/lib/discover.js",
   "src/lib/avatar.js",
   "src/github.js",
   "src/ui.js",

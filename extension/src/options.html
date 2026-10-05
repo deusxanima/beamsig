@@ -101,6 +101,23 @@
     </p>
     <div class="pin" id="shipped-ca">loading…</div>
 
+    <label for="discoverAllow">Discover CAs for unseen clusters</label>
+    <div class="hint">
+      On by default for every Beams tenant (<code>*.beams.sh</code>), so commits
+      from a tenant you have not seen verify with no setup. A signature's
+      certificate names the cluster it claims to come from; that name is only a
+      claim by whoever signed it, so a fetched CA shows the signer controls a
+      Teleport cluster at that hostname, not that you should trust it. Panels say
+      the CA was <em>discovered</em>. The first CA fetched for a cluster is pinned
+      and never overwritten. One glob pattern per line; empty turns discovery off.
+      See <code>beamsig/discover.py</code> for the full argument.
+    </div>
+    <textarea id="discoverAllow" spellcheck="false" style="min-height: 48px"
+      placeholder="*.beams.sh"></textarea>
+    <p class="hint">Discovered so far (compare these with the cluster out of band):</p>
+    <div class="pin" id="discovered-ca">none</div>
+    <button id="forgetDiscovered" type="button">Forget discovered CAs</button>
+
     <label for="extraCAs">Additional CAs (one per line)</label>
     <div class="hint">
       Teleport export format from
@@ -147,6 +164,7 @@
 
     <script src="lib/wire.js"></script>
     <script src="lib/ca.js"></script>
+    <script src="lib/discover.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

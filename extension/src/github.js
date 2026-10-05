@@ -64,6 +64,11 @@
       githubToken: "",
       annotateLists: true,
       listBudget: 10,
+      // User-added trust anchors (options page); loadCAs() in content.js reads them.
+      extraCAs: [],
+      // Discovery allowlist (globs). Defaults to every Beams tenant so it is
+      // hands-free; an empty list turns discovery off. See lib/discover.js.
+      discoverAllow: ns.discover ? ns.discover.DEFAULT_ALLOW : [],
     };
     try {
       const got = await chrome.storage.local.get(defaults);

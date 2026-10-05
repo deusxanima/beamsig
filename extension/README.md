@@ -64,7 +64,8 @@ node extension/tools/console-bundle.mjs | pbcopy
 
 Open a commit page on github.com, open DevTools → Console, type `allow pasting`
 and press Enter (Chrome's paste guard), then paste and press Enter. It runs the
-same scripts; nothing persists (no cache, token or extra CAs) and it lasts until
+same scripts; nothing persists (no cache, token or extra CAs, and no CA
+discovery, which needs the background worker) and it lasts until
 you reload the tab. Re-paste after each full page load.
 
 If nothing appears, open DevTools → Console and filter on `beamsig`; the line
@@ -127,9 +128,46 @@ certificate, chained to the pinned CA), **self-reported**, and **not checked**
 ## Trust anchor
 
 Pinned by value in `src/lib/ca.js`, exported from
-`GET https://<cluster>/webapi/auth/export?type=user`. It is **not** fetched at
-render time: that would trust the network instead of the pin, and the endpoint is
-not CORS-accessible from `github.com` anyway.
+`GET https://<cluster>/webapi/auth/export?type=user`. The pin is always tried
+first and is the strongest anchor. It is never fetched at render time *in place
+of* the pin; discovery below applies only when no known CA matches.
+
+**Other Beams tenants are discovered automatically.** A repo can hold beam commits from any
+tenant, so a CA shipped at install time is not enough. This works the way
+`beamsig/discover.py` does; read its docstring first, because the argument is
+the same. The cluster name in a certificate (`teleport-route-to-cluster`) comes
+from the artifact being verified, so fetching a CA for it is circular: an
+attacker who mints their own CA and a cert claiming `evil.example.com` would
+cause us to fetch that CA, which validates their certificate. It shows the
+signer controls a Teleport cluster at that hostname. It does not show the signer
+is trusted.
+
+So discovery is fenced the same way, even though it is on for Beams:
+
+- **Hands-free for Beams, off for everything else.** The options page has a
+  *discovery allowlist* (globs, the analogue of `--discover-allow`). It defaults to
+  `*.beams.sh`, so any Beams tenant just works with no setup. Empty it to turn
+  discovery off; add patterns to cover other domains.
+- **Allowlisted hostnames only.** Only a cluster matching a pattern is ever
+  contacted, over HTTPS by a background worker (the endpoint sends no CORS
+  headers, so a page script cannot), with no cookies and no redirects. Hosts
+  outside `*.beams.sh` need a permission Chrome asks for when you click Save.
+- **Trust on first use.** The first CA fetched for a cluster is stored and pinned.
+  A pin that later fails to verify a cert is **never overwritten**; the panel says
+  the CA may have been rotated, and you clear it deliberately with *Forget
+  discovered CAs* after checking the new fingerprint out of band. The options
+  page lists what is pinned, with fingerprints.
+- **Reported as discovered.** The issuing CA reads "discovered from `<cluster>` ·
+  pinned on first use · NOT operator-pinned", with a matching warning. A cert that
+  names an allowlisted cluster but is not signed by its CA is **did NOT verify**.
+- **The cluster comes from the CA, not the cert.** As in `verify.py`, the
+  authoritative cluster is the one bound to the CA that verified the cert. A cert
+  claiming a *different* cluster (legitimate in a root/leaf setup) shows the pinned
+  cluster, lists the claim as "NOT authoritative", and warns.
+
+It is a convenience for a team whose tenants are all its own. It is not a
+substitute for pinning. Shipped pins and your own extra CAs are always tried
+first.
 
 Additional CAs can be added in the options page for other clusters. A signature
 accepted by one of those is flagged in the panel as resting on a trust anchor the
@@ -246,6 +284,8 @@ node extension/test/make-preview-data.mjs
 | `src/lib/sshsig.js` | SSHSIG envelope parse + signed-data construction |
 | `src/lib/sshcrypto.js` | WebCrypto verification; mpint→`r‖s` and RSA→SPKI DER |
 | `src/lib/ca.js` | the pinned Teleport user CA, by value |
+| `src/lib/discover.js` | discovery: allowlist match and CA-export parsing (twin of `beamsig/discover.py`) |
+| `src/background.js` | background worker that fetches a cluster's CA for discovery (content scripts cannot: CORS) |
 | `src/lib/verify.js` | the beam-aware policy — port of `beamsig/verify.py` |
 | `src/lib/avatar.js` | deterministic robot avatar seeded by beam UUID — JS port of `tools/avatar/teleport_avatar.py` |
 | `src/github.js` | page routing, API fetch, cache, committer-date extraction |
@@ -266,6 +306,9 @@ node extension/test/make-preview-data.mjs
 step; the checks are in the same order in both, with the same messages.
 
 ## Beam avatars
+
+The robot generator is Jeff's work (jeff@goteleport.com); the JS port and the
+extension wiring build on it.
 
 Each beam gets a generated robot (grey paneled body, coloured highlights), seeded
 by its UUID, shown in the panel header and in list badges so the same beam is

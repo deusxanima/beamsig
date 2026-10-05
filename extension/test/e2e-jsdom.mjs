@@ -30,7 +30,12 @@ const COMMITS = {
 const SHAS = { good: "a".repeat(40), tampered: "b".repeat(40), bare: "c".repeat(40), pgp: "d".repeat(40), unsigned: "e".repeat(40) };
 const bySha = Object.fromEntries(Object.entries(SHAS).map(([k, v]) => [v, k]));
 
-async function page(url, html, { status, store = {}, slow = [] } = {}) {
+const OTHER_CA = "cert-authority ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBIkK4nb+naLyVCXVigbNvs727vk63PRkkMwknE6R3xJTjRJzDg+cWgF09Ah5ivkrIkRfz7bY4xR4jA4ouI/vPK4= clustername=other.beams.sh&type=user";
+const REAL_CA = fx("teleport-user-ca.txt").trim();
+
+// `pinOther`: pin an unrelated CA, so only an on-demand fetch can verify.
+// `exportFor(cluster)`: what the background worker would return for it.
+async function page(url, html, { status, store = {}, slow = [], pinOther = false, exportFor } = {}) {
   const dom = new JSDOM(`<!doctype html><body>${html}</body>`, { url, runScripts: "outside-only", pretendToBeVisual: true });
   const w = dom.window;
   Object.defineProperty(w, "crypto", { value: globalThis.crypto });
@@ -46,11 +51,29 @@ async function page(url, html, { status, store = {}, slow = [] } = {}) {
     return { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ sha: m[1], commit: { verification: c }, committer: { login: "x" }, html_url: "u" }) };
   };
   w.chrome = { storage: { local: {
-    get: async (k) => (k === null ? { ...store } : typeof k === "string" ? { [k]: store[k] } : { ...k, ...store }),
+    // Like the real API: an object argument returns ONLY the keys it names (with
+    // those values as defaults). Returning the whole store here hid a bug where
+    // getSettings() silently dropped extraCAs.
+    get: async (k) => (k === null ? { ...store } : typeof k === "string" ? { [k]: store[k] }
+      : Object.fromEntries(Object.entries(k).map(([key, d]) => [key, key in store ? store[key] : d]))),
     set: async (o) => Object.assign(store, o), remove: async () => {} } } };
-  for (const s of scripts) w.eval(readFileSync(join(ext, s), "utf8"));
+  const asked = [];
+  w.chrome.runtime = {
+    lastError: null,
+    sendMessage: (msg, cb) => {
+      asked.push(msg.cluster);
+      const text = exportFor ? exportFor(msg.cluster) : null;
+      setTimeout(() => cb(text === null ? { ok: false, error: "unreachable" } : { ok: true, text }), 5);
+    },
+  };
+  for (const s of scripts) {
+    w.eval(readFileSync(join(ext, s), "utf8"));
+    if (pinOther && s.endsWith("ca.js") && !s.endsWith("discover.js")) {
+      w.Beamsig.ca.PINNED_CAS.splice(0, 1, { cluster: "other.beams.sh", line: OTHER_CA });
+    }
+  }
   await sleep(700);
-  return { w, d: w.document, calls, store };
+  return { w, d: w.document, calls, store, asked };
 }
 
 const HEADER = `<div class="d-flex flex-column"><div class="CommitAttribution-module__c__h">by me
@@ -115,6 +138,48 @@ p.w.history.pushState({}, "", `/o/r`);
 p.d.body.insertAdjacentHTML("beforeend", "<p>x</p>");
 await sleep(700);
 ok("navigating away removes panel", !p.d.getElementById("beamsig-panel"));
+
+console.log("\ndiscovery (on for *.beams.sh by default, allowlisted, pinned on first use)");
+const ALLOW = {}; // defaults: *.beams.sh
+const GOODURL = `https://github.com/o/r/commit/${SHAS.good}`;
+const serve = (c) => (c === "jeff.beams.sh" ? REAL_CA : null);
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve });
+ok("ON by default for *.beams.sh, no setup", p.asked.join() === "jeff.beams.sh" && T(p).includes("Signed by beam"), `${p.asked} ${T(p).slice(0, 80)}`);
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { discoverAllow: [] } });
+ok("an empty allowlist turns it off: nothing is fetched", p.asked.length === 0);
+ok("...and the panel says discovery is turned off", T(p).includes("Not a beam signature") && T(p).includes("turned off"), T(p));
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { ...ALLOW } });
+ok("asked the cluster named in the cert", p.asked.join() === "jeff.beams.sh", p.asked.join());
+ok("verifies against the discovered CA", T(p).includes("Signed by beam"), T(p).slice(0, 120));
+ok("reports it as DISCOVERED, not operator-pinned", T(p).includes("discovered from jeff.beams.sh") && T(p).includes("NOT operator-pinned"));
+ok("pinned on first use (persisted)", Object.keys(p.store).includes("pin:jeff.beams.sh"));
+const pinned = { ...p.store };
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => null, store: { ...pinned, discoverAllow: [] } });
+ok("next view uses the stored pin, with discovery turned off", p.asked.length === 0 && T(p).includes("Signed by beam") && T(p).includes("discovered from"), T(p).slice(0, 100));
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => REAL_CA, store: { ...ALLOW, "pin:jeff.beams.sh": { text: OTHER_CA.replace("other", "jeff"), fetchedAt: 1 } } });
+ok("an existing pin that does not verify is NEVER overwritten", p.asked.length === 0 && p.store["pin:jeff.beams.sh"].fetchedAt === 1, `${p.asked}`);
+ok("...and the panel points at rotation", T(p).includes("may have been rotated"), T(p));
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => null, store: { ...ALLOW } });
+ok("unreachable cluster => info panel, says discovery failed", T(p).includes("Not a beam signature") && T(p).includes("discovery failed"), T(p));
+ok("...and nothing is pinned", !Object.keys(p.store).some((k) => k.startsWith("pin:")));
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => OTHER_CA.replace("other", "jeff"), store: { ...ALLOW } });
+ok("cluster serves a different CA => FAILED (false claim)", T(p).includes("did NOT verify") && T(p).includes("claims cluster"), T(p));
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { discoverAllow: ["*.example.com"] } });
+ok("cluster outside the allowlist is never contacted", p.asked.length === 0 && T(p).includes("not covered by the discovery allowlist"), `${p.asked}`);
+p = await page(GOODURL, HEADER);
+ok("a matching shipped pin is preferred: no discovery", p.asked.length === 0 && !T(p).includes("discovered"));
+
+console.log("\nuser-added CAs from the options page");
+p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, {
+  pinOther: true, exportFor: () => null,
+  store: { extraCAs: [{ cluster: "jeff.beams.sh", line: REAL_CA }] },
+});
+ok("extraCAs saved in options are used", T(p).includes("Signed by beam"), T(p).slice(0, 120));
+ok("and flagged as a user-added trust anchor", T(p).includes("added in the extension's options"));
 
 console.log("\nstale result after navigation");
 p = await page(`https://github.com/o/r`, HEADER, { slow: ["good"] });
