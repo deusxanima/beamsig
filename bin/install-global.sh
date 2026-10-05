@@ -31,13 +31,16 @@ if [ "${1:-}" = "--uninstall" ]; then
   exit 0
 fi
 
-AUTOSIGN=true; SHOWSIG=true
-for a in "$@"; do
-  case "$a" in
+AUTOSIGN=true; SHOWSIG=true; EXTRA_CLUSTERS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-autosign) AUTOSIGN=false ;;
     --no-showsig)  SHOWSIG=false ;;
-    *) echo "unknown option: $a" >&2; exit 2 ;;
+    --trust)       shift; EXTRA_CLUSTERS+=("${1:?--trust needs a cluster}") ;;
+    --trust=*)     EXTRA_CLUSTERS+=("${1#--trust=}") ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
+  shift
 done
 
 : "${BEAM_ID:?BEAM_ID is not set; are you inside a beam?}"
@@ -51,12 +54,42 @@ fi
 mkdir -p "$CFG"
 chmod 700 "$CFG"
 
-echo "== pinning the Teleport SSH user CA =="
+echo "== pinning Teleport SSH user CAs =="
 # Pin by value, not by URL: a verifier that re-fetches its own trust anchor is
 # trusting the network, not the pin.
-curl -fsS "https://${TELEPORT_CLUSTER}/webapi/auth/export?type=user" \
-  -o "$CFG/pinned-user-ca.txt"
-"$LAB/bin/make-allowed-signers.sh" "$TELEPORT_CLUSTER" 'beams' \
+#
+# The store is a directory of <cluster>.ca files. The filename is the cluster
+# label, and verification takes the authoritative cluster from the pin rather
+# than from the certificate -- which matters as soon as more than one tenant is
+# trusted, because the certificate's cluster extension is only a claim made by
+# whoever signed it. Nothing here is specific to this tenant: --trust <cluster>
+# adds another, or drop a <cluster>.ca file in by hand.
+STORE="$CFG/trusted"
+mkdir -p "$STORE"
+chmod 700 "$STORE"
+
+pin_cluster() { # pin_cluster <cluster>
+  local c="$1"
+  curl -fsS "https://${c}/webapi/auth/export?type=user" -o "$STORE/${c}.ca" || {
+    echo "   warning: could not fetch the user CA for $c" >&2
+    rm -f "$STORE/${c}.ca"
+    return 1
+  }
+  printf '   %s\n' "$STORE/${c}.ca"
+}
+
+pin_cluster "$TELEPORT_CLUSTER"
+cp "$STORE/${TELEPORT_CLUSTER}.ca" "$CFG/pinned-user-ca.txt"
+CLUSTERS=("$TELEPORT_CLUSTER")
+for c in ${EXTRA_CLUSTERS[@]+"${EXTRA_CLUSTERS[@]}"}; do
+  if [ "$c" != "$TELEPORT_CLUSTER" ] && pin_cluster "$c"; then
+    CLUSTERS+=("$c")
+  fi
+done
+
+# allowed_signers is what stock ssh-keygen consults, and it has no notion of
+# which cluster a CA belongs to; list every trusted cluster's CA.
+"$LAB/bin/make-allowed-signers.sh" 'beams' "${CLUSTERS[@]}" \
   > "$CFG/allowed_signers"
 CA_FP=$("$LAB/venv/bin/python" - "$CFG/pinned-user-ca.txt" <<'PY'
 import sys, base64, hashlib
@@ -68,7 +101,7 @@ for tok in open(sys.argv[1]).read().split():
 PY
 )
 echo "   $CFG/pinned-user-ca.txt  ($CA_FP)"
-echo "   $CFG/allowed_signers"
+echo "   $CFG/allowed_signers      (${#CLUSTERS[@]} cluster(s))"
 
 # A current copy of the certificate. The shim ignores user.signingkey and
 # refreshes this file itself on every signature, so it never goes stale; it is
@@ -117,5 +150,8 @@ Caveats worth knowing:
     verify Teleport certificates and will label the commits "Unverified".
   * The signer shown is the beam. The certificate Key ID is the owner
     ($(git config --global --get user.email)), who is impersonated, not the signer.
+  * Trust is per tenant: ${CLUSTERS[*]}.
+    Add another with: $0 --trust <cluster>
+    or: $LAB/bin/beamsig trust <cluster>
   * Undo with: $0 --uninstall
 EOF

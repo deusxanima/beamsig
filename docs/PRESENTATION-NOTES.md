@@ -91,6 +91,27 @@ response is *not* valid OpenSSH `allowed_signers` syntax — it is missing the
 leading principal field — so if you pass it to `ssh-keygen` you must prepend
 one. See `bin/make-allowed-signers.sh`.
 
+**Do not assume one tenant.** Keep a *map* of cluster → CA, not a single
+anchor, and key it by cluster so the UI can serve more than one Beams tenant.
+`beamsig` stores pins as `~/.config/beamsig/trusted/<cluster>.ca`; `beamsig
+trust <cluster>` adds one.
+
+**Take the cluster from the pin, never from the certificate.** This is a real
+spoofing vector, not a theoretical one. `teleport-route-to-cluster` is just a
+claim made by whoever signed the certificate, so if you trust two tenants,
+either can mint a certificate claiming to be the other. The JSON reflects this:
+
+| field | meaning |
+|---|---|
+| `cluster` | **authoritative** — the cluster the verifying pin is bound to |
+| `cluster_claimed` | what the certificate says; display only, may differ |
+| `cluster_pinned` | `false` means the pin was unlabelled and `cluster` fell back to the claim |
+
+Render `cluster`. If `cluster_pinned` is `false`, or `cluster_claimed` differs
+from `cluster`, say so — both land in `warnings[]` too. And treat a beam's
+identity as the pair *(cluster, beam_id)*; a beam id alone is not unique across
+tenants as far as a verifier can prove.
+
 ## Three things you must NOT claim
 
 These are the ways a UI will mislead people. Please get them right.

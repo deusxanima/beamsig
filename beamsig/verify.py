@@ -14,7 +14,9 @@ matches certificate *principals*, which on a beam are the generic Unix logins
 """
 import base64
 import datetime
+import os
 import re
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -55,7 +57,9 @@ class Attestation:
     roles: list = field(default_factory=list)
     principals: list = field(default_factory=list)
     login_ip: str = ""
-    cluster: str = ""
+    cluster: str = ""            # authoritative: the cluster the pin is bound to
+    cluster_claimed: str = ""    # what the certificate itself says
+    cluster_pinned: bool = False # True when the trust anchor was cluster-labelled
     # crypto
     signing_key_fp: str = ""
     ca_fp: str = ""
@@ -73,36 +77,103 @@ def _iso(v):
     return datetime.datetime.fromtimestamp(v, datetime.timezone.utc).isoformat()
 
 
-def load_ca_blobs(source: str) -> list:
-    """Load Teleport SSH user CA public key blobs.
+@dataclass
+class TrustAnchor:
+    """A pinned Teleport user CA, bound to the cluster it belongs to.
 
-    `source` is either a path to a pinned file, or an https URL to
-    /webapi/auth/export?type=user. Accepts both the raw Teleport export format
-    (`cert-authority <type> <b64> ...`) and allowed_signers/known_hosts lines.
+    The binding matters as soon as more than one tenant is trusted. A
+    certificate's `teleport-route-to-cluster` extension is only a claim made by
+    whichever CA signed it, so if two tenants are trusted, tenant A can mint a
+    certificate claiming to be from tenant B. The authoritative cluster is
+    therefore the one attached to the *pin*, never the one in the certificate.
     """
-    if source.startswith("http://") or source.startswith("https://"):
-        with urllib.request.urlopen(source, timeout=20) as r:
-            text = r.read().decode()
-    else:
-        with open(source) as f:
-            text = f.read()
-    blobs = []
+    blob: bytes
+    cluster: str = ""      # "" means the pin carries no cluster label
+    source: str = ""
+
+    @property
+    def fingerprint(self) -> str:
+        return fp(self.blob)
+
+
+def _cluster_from_name(name: str) -> str:
+    """Treat a trust-store filename like `example.teleport.sh.ca` as a label."""
+    stem = re.sub(r"\.(ca|txt|pub|pem)$", "", os.path.basename(name))
+    return stem if "." in stem and " " not in stem else ""
+
+
+def _parse_anchors(text: str, source: str, label: str = "") -> list:
+    """Pull CA keys out of a Teleport export, allowed_signers or known_hosts.
+
+    Teleport's /webapi/auth/export?type=user response ends with
+    `clustername=<cluster>&type=user`, which is used as the cluster label when
+    one was not supplied explicitly. That label is operator-asserted pin
+    metadata -- it is not signed -- and it is trustworthy only because you
+    fetched the file from that cluster over TLS and chose to pin it.
+    """
+    out = []
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
+        cluster = label
+        m = re.search(r"clustername=([^&\s]+)", line)
+        if not cluster and m:
+            cluster = m.group(1)
         for tok in line.split():
             if tok.startswith("AAAA"):
                 try:
                     blob = base64.b64decode(tok)
                     Reader(blob).string()
-                    blobs.append(blob)
                 except Exception:
-                    pass
+                    break
+                out.append(TrustAnchor(blob=blob, cluster=cluster, source=source))
                 break
-    if not blobs:
-        raise VerifyError(f"no SSH CA public keys found in {source}")
-    return blobs
+    return out
+
+
+def load_trust_anchors(sources) -> list:
+    """Build a trust store from files, directories and/or export URLs.
+
+    A directory is treated as a trust store: every file in it is a pin, and the
+    filename (minus extension) is the cluster label, so dropping
+    `other-tenant.teleport.sh.ca` in makes that tenant verifiable without
+    touching anything else. Nothing here is specific to one tenant.
+    """
+    if isinstance(sources, (str, bytes)):
+        sources = [sources]
+    anchors = []
+    for src in sources:
+        if not src:
+            continue
+        if src.startswith("http://") or src.startswith("https://"):
+            label = urllib.parse.urlsplit(src).hostname or ""
+            with urllib.request.urlopen(src, timeout=20) as r:
+                anchors += _parse_anchors(r.read().decode(), src, label)
+        elif os.path.isdir(src):
+            for name in sorted(os.listdir(src)):
+                path = os.path.join(src, name)
+                if not os.path.isfile(path):
+                    continue
+                with open(path) as f:
+                    anchors += _parse_anchors(f.read(), path,
+                                              _cluster_from_name(name))
+        else:
+            # An explicit "cluster=path" pins the label regardless of content.
+            label = ""
+            if "=" in src and not os.path.exists(src):
+                label, _, src = src.partition("=")
+            with open(src) as f:
+                anchors += _parse_anchors(f.read(), src,
+                                          label or _cluster_from_name(src))
+    if not anchors:
+        raise VerifyError(f"no SSH CA public keys found in {sources}")
+    return anchors
+
+
+def load_ca_blobs(source) -> list:
+    """Backwards-compatible shim: just the key material, no cluster binding."""
+    return [a.blob for a in load_trust_anchors(source)]
 
 
 def fp(blob: bytes) -> str:
@@ -111,11 +182,15 @@ def fp(blob: bytes) -> str:
         hashlib.sha256(blob).digest()).decode().rstrip("=")
 
 
-def verify_sshsig(sig_bytes: bytes, payload: bytes, ca_blobs: list,
+def verify_sshsig(sig_bytes: bytes, payload: bytes, trust, 
                   namespace: str = "git", claimed_time: int = None,
                   claimed_time_source: str = "caller",
                   require_beam: bool = True,
-                  expect_beam_id: str = None) -> Attestation:
+                  expect_beam_id: str = None,
+                  expect_cluster: str = None) -> Attestation:
+    """`trust` is a list of TrustAnchor, or of raw CA blobs (no cluster binding)."""
+    anchors = [a if isinstance(a, TrustAnchor) else TrustAnchor(blob=a)
+               for a in trust]
     import hashlib
 
     att = Attestation()
@@ -145,19 +220,19 @@ def verify_sshsig(sig_bytes: bytes, payload: bytes, ca_blobs: list,
     cert = sshcert.parse(s.publickey)
 
     # ---- 3. the certificate must chain to a pinned Teleport user CA
-    ca_ok = False
-    for ca in ca_blobs:
+    matched = None
+    for anchor in anchors:
         try:
-            sshcrypto.verify(ca, cert.signature, cert.signed_bytes)
-            ca_ok = True
+            sshcrypto.verify(anchor.blob, cert.signature, cert.signed_bytes)
+            matched = anchor
             break
         except (InvalidSignature, ValueError):
             continue
-    if not ca_ok:
+    if matched is None:
         raise VerifyError(
             "certificate is not signed by any trusted Teleport user CA "
-            f"(cert says CA={cert.ca_fingerprint}, "
-            f"trusted={[fp(c) for c in ca_blobs]})")
+            f"(cert says CA={cert.ca_fingerprint}, trusted="
+            f"{[(a.cluster or '?', a.fingerprint) for a in anchors]})")
     att.ca_fp = cert.ca_fingerprint
     att.signing_key_fp = cert.key_fingerprint
     att.cert_serial = cert.serial
@@ -188,7 +263,29 @@ def verify_sshsig(sig_bytes: bytes, payload: bytes, ca_blobs: list,
     att.owner = cert.key_id
     att.principals = cert.valid_principals
     att.login_ip = ext(LOGIN_IP_EXT)
-    att.cluster = ext(ROUTE_EXT)
+    # The certificate's own cluster extension is a CLAIM, scoped to whoever
+    # signed it. The authoritative value is the cluster bound to the pin that
+    # verified the certificate.
+    att.cluster_claimed = ext(ROUTE_EXT)
+    att.cluster = matched.cluster or att.cluster_claimed
+    att.cluster_pinned = bool(matched.cluster)
+    if not matched.cluster:
+        att.warnings.append(
+            "the trust anchor carries no cluster label, so the cluster name "
+            f"{att.cluster_claimed!r} is taken from the certificate and is not "
+            "independently verified; label the pin (e.g. name the trust-store "
+            "file <cluster>.ca) to bind it")
+    elif att.cluster_claimed and att.cluster_claimed != matched.cluster:
+        # Legitimate in a root/leaf trusted-cluster setup, so not fatal, but it
+        # is also exactly what cross-tenant spoofing looks like.
+        att.warnings.append(
+            f"certificate claims cluster {att.cluster_claimed!r} but was signed "
+            f"by the CA pinned for {matched.cluster!r}; treating "
+            f"{matched.cluster!r} as authoritative")
+    if expect_cluster and att.cluster != expect_cluster:
+        raise VerifyError(
+            f"cluster mismatch: signature verifies under the CA pinned for "
+            f"{att.cluster!r}, expected {expect_cluster!r}")
     roles_raw = ext(ROLES_EXT)
     if roles_raw:
         import json
@@ -255,7 +352,10 @@ def render(att: Attestation) -> str:
     L.append(f"  bot name             : {att.bot_name}")
     L.append(f"  bot instance id      : {att.bot_instance_id}   (stable per beam boot)")
     L.append(f"  delegation session   : {att.delegation_session_id}")
-    L.append(f"  teleport cluster     : {att.cluster}")
+    L.append(f"  teleport cluster     : {att.cluster}"
+             + ("" if att.cluster_pinned else "   (from the certificate, unpinned)"))
+    if att.cluster_claimed and att.cluster_claimed != att.cluster:
+        L.append(f"  cluster claimed      : {att.cluster_claimed}   (NOT authoritative)")
     L.append(f"  owner (cert Key ID)  : {att.owner}   (impersonated human, NOT the signer)")
     L.append(f"  teleport roles       : {', '.join(att.roles)}")
     L.append(f"  cert principals      : {', '.join(att.principals)}")

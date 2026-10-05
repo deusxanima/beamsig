@@ -44,6 +44,52 @@ carrying a *forged* `bot-name`, because it never reads that extension.
 `bot-name@goteleport.com` to match `beam-<uuid>`, and checks the claimed time
 against the certificate window.
 
+## Trust is per tenant, not baked in
+
+Nothing here is wired to one Teleport cluster. The trust anchor is discovered
+at install time from `$TELEPORT_CLUSTER` and pinned into a store of
+cluster-labelled files:
+
+```
+~/.config/beamsig/trusted/<cluster>.ca
+```
+
+To verify beams from another tenant, add its CA — then both verify from the
+same store:
+
+```bash
+./bin/beamsig trust other-tenant.teleport.sh      # fetch and pin
+./bin/beamsig trust --list
+./bin/install-global.sh --trust other-tenant.teleport.sh
+```
+
+**The authoritative cluster comes from the pin, never from the certificate.**
+A certificate's `teleport-route-to-cluster` extension is only a claim made by
+whoever signed it, so once two tenants are trusted, either could mint a
+certificate claiming to be the other. `beamsig` reports the cluster that the
+*verifying CA* is pinned for, and flags a disagreeing claim as not
+authoritative:
+
+```
+teleport cluster     : other-tenant.example.sh
+cluster claimed      : jeff.beams.sh   (NOT authoritative)
+! certificate claims cluster 'jeff.beams.sh' but was signed by the CA pinned
+  for 'other-tenant.example.sh'; treating 'other-tenant.example.sh' as authoritative
+```
+
+`--cluster <name>` scopes a verification to one tenant and fails otherwise.
+`bin/multitenant-tests.sh` exercises this, including the spoofing case.
+
+Two consequences worth knowing. A beam's identity is really the pair
+*(cluster, beam id)* — `--beam-id` alone is under-specified across tenants, so
+pass `--cluster` too when it matters. And an **unlabelled** pin cannot vouch for
+a cluster name: beamsig falls back to the certificate's claim and says so
+loudly, which is why the store uses `<cluster>.ca` filenames.
+
+Stock `ssh-keygen` cannot do any of this: `allowed_signers` has no way to say
+which cluster a `cert-authority` line belongs to, so with several tenants
+listed it cannot tell them apart.
+
 ## Biggest caveat
 
 The beam key **never rotates** — only the certificate does, every 20 minutes,
