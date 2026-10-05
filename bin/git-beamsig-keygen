@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""A drop-in `gpg.ssh.program` for git that makes signatures beam-aware.
+
+Git drives `gpg.ssh.program` like this:
+
+    sign  : <prog> -Y sign -n git -f <user.signingkey> <payloadfile>
+            (writes <payloadfile>.sig)
+    verify: <prog> -Y find-principals -f <allowed_signers> -s <sig> -Overify-time=<date>
+            <prog> -Y verify -n git -f <allowed_signers> -I <first line of the above>
+                   -s <sig> -Overify-time=<date>                 payload on stdin
+
+Git uses the first line of `find-principals` as the signer it reports in `%GS`,
+and prints whatever `verify` writes as the body of `git log --show-signature`.
+So we can surface the real beam identity in both places by:
+
+  * find-principals -> report `beam-<uuid>` instead of the SSH login principal
+  * verify          -> translate that back to a genuine cert principal, hand the
+                       real work to ssh-keygen, THEN additionally run beamsig's
+                       beam checks and print a beam-aware report.
+
+This is not cosmetic. ssh-keygen still does the certificate-chain and
+time-window check, and on top of that we require the certificate to chain to a
+*pinned* Teleport user CA and to carry bot-name@goteleport.com = beam-<uuid>.
+If either fails we exit non-zero and git reports the signature as bad.
+
+Signing is also intercepted, for a practical reason: the beam's certificate is
+replaced every ~20 minutes, so any `user.signingkey` file goes stale and git
+starts failing with "agent refused operation". We therefore ignore the -f value
+entirely, read the *current* certificate out of the identity file on every
+signature, and talk to Teleport's hardware key agent directly. That means no
+ssh-agent daemon and no SSH_AUTH_SOCK are needed, which is what makes a global
+~/.gitconfig setup viable.
+
+Configure per-repo with:
+
+    git config gpg.ssh.program  "$PWD/bin/git-beamsig-keygen"
+    git config log.showSignature true
+
+or beam-wide with `bin/install-global.sh`.
+
+Environment:
+    BEAMSIG_CA          pinned Teleport SSH user CA (default <home>/ca/pinned-user-ca.txt)
+    BEAMSIG_SSH_KEYGEN  real ssh-keygen (default /usr/bin/ssh-keygen)
+    BEAMSIG_ALIAS_MAP   optional "<uuid> <alias>" lines, shown but marked unverified
+    BEAMSIG_PLAIN       set to 1 to disable colour
+"""
+import datetime
+import os
+import re
+import subprocess
+import sys
+
+_HOME = os.environ.get("BEAMSIG_HOME") or os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _HOME)
+
+# git invokes this with whatever python is on PATH, which is usually the system
+# one and has none of our dependencies. Re-exec under the project venv once.
+if not os.environ.get("_BEAMSIG_REEXEC"):
+    try:
+        import grpc  # noqa: F401
+        import cryptography  # noqa: F401
+    except ImportError:
+        _venv = os.path.join(_HOME, "venv", "bin", "python")
+        if os.path.exists(_venv):
+            os.environ["_BEAMSIG_REEXEC"] = "1"
+            os.environ.setdefault("BEAMSIG_HOME", _HOME)
+            os.execv(_venv, [_venv, os.path.abspath(__file__)] + sys.argv[1:])
+        sys.stderr.write(
+            "beamsig: missing dependencies and no venv at %s; run bin/setup.sh\n"
+            % _venv)
+        sys.exit(1)
+
+REAL = os.environ.get("BEAMSIG_SSH_KEYGEN", "/usr/bin/ssh-keygen")
+CA = os.environ.get("BEAMSIG_CA", os.path.join(_HOME, "ca", "pinned-user-ca.txt"))
+
+BEAM_RE = re.compile(r"^beam-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+_TTY = sys.stdout.isatty() and not os.environ.get("BEAMSIG_PLAIN")
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if _TTY else s
+
+
+def run_real(argv, stdin_data=None):
+    p = subprocess.run([REAL] + argv, input=stdin_data,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return p.returncode, p.stdout
+
+
+def opt_value(argv, flag):
+    """Value of `-X value` (space separated)."""
+    try:
+        return argv[argv.index(flag) + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def verify_time(argv):
+    for a in argv:
+        if a.startswith("-Overify-time="):
+            v = a.split("=", 1)[1].rstrip("Z")
+            for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y%m%d"):
+                try:
+                    return int(datetime.datetime.strptime(v, fmt)
+                               .replace(tzinfo=datetime.timezone.utc).timestamp())
+                except ValueError:
+                    continue
+    return None
+
+
+def read_sig(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def beam_of(sig_bytes):
+    """Return (beam_id, cert) or (None, None) without doing any verification."""
+    try:
+        from beamsig import sshsig, sshcert, verify as vmod
+        s = sshsig.parse(sig_bytes)
+        if not s.is_certificate:
+            return None, None
+        cert = sshcert.parse(s.publickey)
+        name = cert.extensions.get(vmod.BOT_NAME_EXT, b"").decode("utf-8", "replace")
+        m = vmod.BEAM_BOT_RE.match(name)
+        return (m.group(1) if m else None), cert
+    except Exception:
+        return None, None
+
+
+def alias_for(beam_id):
+    """Best-effort, explicitly untrusted: the alias is in no certificate."""
+    if os.environ.get("BEAM_ID") == beam_id and os.environ.get("BEAM_ALIAS"):
+        return os.environ["BEAM_ALIAS"]
+    path = os.environ.get("BEAMSIG_ALIAS_MAP")
+    if path and os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == beam_id:
+                    return parts[1]
+    return None
+
+
+def iso(t):
+    return datetime.datetime.fromtimestamp(
+        t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def do_find_principals(argv):
+    rc, out = run_real(argv)
+    if rc != 0:
+        sys.stdout.buffer.write(out)
+        return rc
+    # Pass the genuine principals through. Git feeds the first one back to us
+    # as -I, and the real ssh-keygen must be able to match it. The beam name is
+    # surfaced later, from the first line of our verify output, which is where
+    # git actually reads %GS from.
+    sys.stdout.buffer.write(out)
+    return 0
+
+
+def do_verify(argv):
+    payload = sys.stdin.buffer.read()
+    sig_path = opt_value(argv, "-s")
+    allowed = opt_value(argv, "-f")
+    principal = opt_value(argv, "-I")
+    sig = read_sig(sig_path)
+
+    # 1. translate our synthetic beam principal back to a genuine one so the
+    #    real ssh-keygen can do its job.
+    real_argv = list(argv)
+    if principal and BEAM_RE.match(principal):
+        rc, out = run_real(["-Y", "find-principals", "-f", allowed, "-s", sig_path])
+        cand = out.decode().split()
+        if rc != 0 or not cand:
+            sys.stdout.buffer.write(out)
+            return 1
+        real_argv[real_argv.index("-I") + 1] = cand[0]
+
+    # 2. the actual OpenSSH check: cert chains to the CA in allowed_signers,
+    #    principal is listed, signature matches payload, time in window.
+    rc, out = run_real(real_argv, stdin_data=payload)
+    if rc != 0:
+        sys.stdout.buffer.write(out)
+        return rc
+
+    # 3. the beam-specific checks ssh-keygen cannot do.
+    try:
+        from beamsig import verify as vmod
+        att = vmod.verify_sshsig(
+            sig, payload, vmod.load_ca_blobs(CA), namespace="git",
+            claimed_time=verify_time(argv),
+            claimed_time_source="git commit date", require_beam=True)
+    except Exception as e:
+        print(c("31", f"BAD beam signature: {e}"))
+        return 1
+
+    # The FIRST line must match the shape git's parse_ssh_output() expects:
+    #   Good "git" signature for <principal> with <KEYTYPE> key SHA256:<fp>
+    # git takes everything between "for " and the last " with " as the signer,
+    # so putting the beam name there is what makes %GS report the beam and
+    # %G? report G. Anything after the first line is free-form and is shown
+    # verbatim by `git log --show-signature`.
+    keytype = "ECDSA-CERT" if att.sig_algorithm.startswith("ecdsa") else "CERT"
+    print(f'Good "git" signature for beam-{att.beam_id} '
+          f'with {keytype} key {att.signing_key_fp}')
+    alias = alias_for(att.beam_id)
+    if alias:
+        print(f"  beam alias    {alias}  " + c("33", "(self-reported, not in the certificate)"))
+    print(f"  bot instance  {att.bot_instance_id}")
+    print(f"  delegation    {att.delegation_session_id}")
+    print(f"  roles         {', '.join(att.roles)}")
+    print(f"  owner         {att.owner}  "
+          + c("33", "(impersonated, NOT the signer)"))
+    print(f"  cert window   {iso(att.valid_after)} .. {iso(att.valid_before)}")
+    ct = att.claimed_time
+    print(f"  commit time   {iso(ct) if ct else '(unknown)'}"
+          + ("  in window" if ct else ""))
+    print(f"  signing key   {att.signing_key_fp}")
+    print(f"  teleport CA   {att.ca_fp}  ({att.cluster})")
+    if ct is None:
+        print("  " + c("33", "! no commit time supplied; window not checked"))
+    return 0
+
+
+def do_sign(argv):
+    """Sign with the CURRENT beam certificate, via the hardware key agent.
+
+    The -f value is deliberately ignored: a file written even 20 minutes ago
+    holds a superseded certificate, and offering it to the agent fails.
+    """
+    namespace = opt_value(argv, "-n") or "git"
+    # payload is the last positional argument
+    positional = [a for i, a in enumerate(argv)
+                  if not a.startswith("-")
+                  and (i == 0 or argv[i - 1] not in ("-n", "-f", "-I", "-s", "-Y"))]
+    if not positional:
+        print("beamsig: no payload file in sign request", file=sys.stderr)
+        return 1
+    payload_file = positional[-1]
+    with open(payload_file, "rb") as f:
+        payload = f.read()
+    try:
+        from beamsig.cli import _sign_blob
+        armored = _sign_blob(payload, namespace)
+    except Exception as e:
+        print(f"beamsig: signing failed: {e}", file=sys.stderr)
+        return 1
+    with open(payload_file + ".sig", "wb") as f:
+        f.write(armored)
+    _refresh_cert_cache()
+    return 0
+
+
+def _refresh_cert_cache():
+    """Keep ~/.config/beamsig/beam-cert.pub current.
+
+    We ignore user.signingkey, but other tools (and anyone who disables this
+    shim) will read that file, and a certificate more than ~20 minutes old is
+    useless. Cheap to keep honest, so do it opportunistically.
+    """
+    cfg = os.environ.get("BEAMSIG_CONFIG_DIR",
+                         os.path.expanduser("~/.config/beamsig"))
+    dest = os.path.join(cfg, "beam-cert.pub")
+    if not os.path.isdir(cfg):
+        return
+    try:
+        from beamsig import identity as ident_mod
+        line = ident_mod.load().ssh_cert_line
+        if os.path.exists(dest) and open(dest, "rb").read().strip() == line.strip():
+            return
+        tmp = dest + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(line + b"\n")
+        os.replace(tmp, dest)
+    except Exception:
+        pass
+
+
+def main():
+    argv = sys.argv[1:]
+    if "-Y" in argv:
+        mode = argv[argv.index("-Y") + 1]
+        if mode == "sign":
+            return do_sign(argv)
+        if mode == "find-principals":
+            return do_find_principals(argv)
+        if mode == "verify":
+            return do_verify(argv)
+    # everything else: pass straight through
+    os.execv(REAL, [REAL] + argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

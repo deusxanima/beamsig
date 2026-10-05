@@ -60,8 +60,50 @@ and §6.3.
 ```bash
 sudo apt-get install -y python3-venv      # if needed
 ./bin/setup.sh                            # venv, gRPC stubs, Teleport CA export
-./bin/start-agent.sh                      # ssh-agent shim over the hardware key agent
+./bin/install-global.sh                   # beam-wide git signing (recommended)
 ```
+
+`install-global.sh` writes `~/.gitconfig` so that **every** repository in the
+beam signs as the beam and `git log` reports who signed, with no per-repo setup:
+
+```console
+$ cd /some/fresh/repo && git commit -m "a beam did this"
+$ git log
+commit 29305411ae0b812c0fdec10a3129e3362560fa72
+Good "git" signature for beam-1786bcd6-04b9-4b9e-ad87-0c13071df7e9 with ECDSA-CERT key SHA256:4jXdejzB…
+  beam alias    clever-nebula  (self-reported, not in the certificate)
+  bot instance  dbe1cf6c-8f89-4ab3-bfee-9e2c7e710f6c
+  roles         editor, access, auditor, beam-user
+  owner         jeff@goteleport.com  (impersonated, NOT the signer)
+  cert window   2026-10-05T16:16:27Z .. 2026-10-05T17:17:27Z
+  commit time   2026-10-05T16:26:44Z  in window
+  teleport CA   SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU  (jeff.beams.sh)
+
+$ git log -1 --format='%G? %GS'
+G beam-1786bcd6-04b9-4b9e-ad87-0c13071df7e9
+```
+
+This works through `gpg.ssh.program` = `bin/git-beamsig-keygen`, a drop-in
+replacement for `ssh-keygen` in git's signing path. It is **not** a cosmetic
+filter: the real `ssh-keygen` still does the certificate-chain and time-window
+check, and the shim then additionally requires the certificate to chain to a
+*pinned* Teleport user CA and to carry `bot-name@goteleport.com = beam-<uuid>`.
+Point it at the wrong CA or forge a commit date and `%G?` goes to `B` / `U` and
+the exit code is non-zero.
+
+It also intercepts *signing*, which removes two sharp edges: the beam
+certificate is replaced every ~20 minutes, so any `user.signingkey` file goes
+stale and git starts failing with `agent refused operation`; and signing via
+`ssh-keygen` needs an ssh-agent and `SSH_AUTH_SOCK`. The shim reads the current
+certificate on every signature and talks to the hardware key agent directly, so
+**no agent daemon and no environment variables are required**.
+
+Undo with `./bin/install-global.sh --uninstall`. Options: `--no-autosign`,
+`--no-showsig` (`log.showSignature=true` verifies every commit it displays,
+which is fine for a demo and slow on a long history).
+
+For a single repository instead, or to use stock `ssh-keygen`, there is still
+`./bin/start-agent.sh` (ssh-agent shim) plus the per-repo config shown below.
 
 ## Use
 
@@ -96,9 +138,12 @@ word `Good` on a line *before* failing, so never grep for it.
 | Path | What |
 |---|---|
 | `REPORT.md` | the findings write-up — start here |
+| `docs/PRESENTATION-NOTES.md` | hand-off note for a UI / presentation layer, incl. the GitHub userscript route |
 | `beamsig/` | the library (see below) |
 | `bin/beamsig` | CLI: `sign`, `verify`, `verify-commit`, `attest`, `verify-attestation`, `inspect` |
-| `bin/beamsig-agent`, `bin/start-agent.sh` | ssh-agent shim over the hardware key agent |
+| `bin/git-beamsig-keygen` | drop-in `gpg.ssh.program`: beam-aware `git log` / `git verify-commit`, and rotation-proof signing |
+| `bin/install-global.sh` | beam-wide `~/.gitconfig` setup (`--uninstall` to undo) |
+| `bin/beamsig-agent`, `bin/start-agent.sh` | ssh-agent shim, for stock `ssh-keygen` / per-repo use |
 | `bin/setup.sh` | venv + gRPC stubs + CA export |
 | `bin/split-identity.sh`, `bin/inventory.py` | Exp 1: decode the identity file, SSH extensions, X.509 OIDs |
 | `bin/watch-renewal.py`, `bin/start-watch.sh` | Exp 1: archive and diff every identity version |

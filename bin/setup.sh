@@ -37,7 +37,7 @@ if [ -n "${TELEPORT_CLUSTER:-}" ]; then
       -o "ca/export-$t.txt" && echo "  ca/export-$t.txt"
   done
   cp ca/export-user.txt ca/pinned-user-ca.txt
-  ./bin/make-allowed-signers.sh "$TELEPORT_CLUSTER" '*' > ca/allowed_signers
+  ./bin/make-allowed-signers.sh "$TELEPORT_CLUSTER" 'beams' > ca/allowed_signers
   echo "  ca/allowed_signers"
   # the SSH certificate, for git's user.signingkey. Must be the CERTIFICATE:
   # pointing user.signingkey at a bare key silently drops all beam identity.
