@@ -39,8 +39,8 @@ def synthetic_seeds(n: int) -> list[str]:
     return sorted(seeds)
 
 
-def tile(seed: str, size: int, label: bool) -> str:
-    c = ta.choices_for(seed)
+def tile(seed: str, size: int, label: bool, version: str | None = None) -> str:
+    c = ta.choices_for(seed, version)
     d = ta.describe(c)
     tip = html.escape(f"{seed}\n" + "\n".join(f"{k}: {v}" for k, v in d.items()))
     cap = ""
@@ -70,11 +70,11 @@ def parts_sheet() -> str:
     return "".join(rows)
 
 
-def stats(seeds: list[str]) -> str:
+def stats(seeds: list[str], version: str | None = None) -> str:
     combos = defaultdict(list)
     per_slot = {a: Counter() for a in ta.AXES}
     for s in seeds:
-        c = ta.choices_for(s)
+        c = ta.choices_for(s, version)
         combos[tuple(sorted(c.items()))].append(s)
         for k, v in ta.describe(c).items():
             per_slot[k][v] += 1
@@ -132,9 +132,8 @@ figure{margin:0}
 
 
 def build(seeds: list[str], version: str) -> str:
-    ta.VERSION = version
-    g32 = "".join(tile(s, 32, False) for s in seeds)
-    g128 = "".join(tile(s, 128, True) for s in seeds[:60])
+    g32 = "".join(tile(s, 32, False, version) for s in seeds)
+    g128 = "".join(tile(s, 128, True, version) for s in seeds[:60])
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Robot avatars {html.escape(version)}</title><style>{CSS}</style></head>
@@ -144,7 +143,7 @@ def build(seeds: list[str], version: str) -> str:
 <h2>32px, circular crop</h2><div class="grid32">{g32}</div>
 <h2>128px, first 60 seeds</h2><div class="grid128">{g128}</div>
 <h2>Parts sheet</h2><p class="note">Each option varies alone against a reference robot, at 96px and 32px, with its selection weight.</p>{parts_sheet()}
-<h2>Distribution</h2>{stats(seeds)}
+<h2>Distribution</h2>{stats(seeds, version)}
 </body></html>"""
 
 

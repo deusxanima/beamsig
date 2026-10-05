@@ -8,6 +8,7 @@
     annotateLists: true,
     listBudget: 10,
     extraCAs: [],
+    trustedDomains: globalThis.Beamsig.cafetch.DEFAULT_TRUSTED_DOMAINS,
   };
 
   function status(msg) {
@@ -49,6 +50,7 @@
     $("githubToken").value = s.githubToken || "";
     $("annotateLists").checked = !!s.annotateLists;
     $("listBudget").value = Number.isFinite(s.listBudget) ? s.listBudget : 10;
+    $("trustedDomains").value = (s.trustedDomains || []).join("\n");
     $("extraCAs").value = (s.extraCAs || []).map((c) => c.line).join("\n");
   }
 
@@ -60,12 +62,22 @@
       status(e.message);
       return;
     }
+    const trustedDomains = $("trustedDomains")
+      .value.split(/[\s,]+/)
+      .map((d) => d.trim().toLowerCase().replace(/^\*?\./, ""))
+      .filter(Boolean);
+    const badDomain = trustedDomains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
+    if (badDomain) {
+      status(`not a domain: ${badDomain}`);
+      return;
+    }
     const budget = Math.max(0, Math.min(100, Number($("listBudget").value) || 0));
     await chrome.storage.local.set({
       githubToken: $("githubToken").value.trim(),
       annotateLists: $("annotateLists").checked,
       listBudget: budget,
       extraCAs,
+      trustedDomains,
     });
     $("listBudget").value = budget;
     status("Saved. Reload any open GitHub tab.");

@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
 const lib = join(here, "..", "src", "lib");
 
-for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "avatar.js"]) {
+for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "cafetch.js", "avatar.js"]) {
   // eslint-disable-next-line no-eval
   eval(readFileSync(join(lib, f), "utf8"));
 }
@@ -355,6 +355,77 @@ console.log("\navatar (JS port vs Python golden)");
     "seed is trimmed and case-folded",
     avatar.avatar("  JEFF@Example.com ") === avatar.avatar("jeff@example.com")
   );
+}
+
+console.log("\ncafetch: which clusters may we fetch a CA from");
+{
+  const { cafetch } = globalThis.Beamsig;
+  const D = ["beams.sh"];
+  const yes = (h, d = D) => ok(`trusted: ${h}`, cafetch.isTrustedCluster(h, d) === true);
+  const no = (h, d = D) => ok(`refused: ${JSON.stringify(h)}`, cafetch.isTrustedCluster(h, d) === false);
+  yes("quiet-hat.beams.sh");
+  yes("jeff.beams.sh");
+  yes("a.b.beams.sh");
+  yes("quiet-hat.beams.sh", ["*.beams.sh"]);
+  yes("quiet-hat.beams.sh", [".BEAMS.sh "]);
+  no("beams.sh"); // the apex is not a tenant
+  no("evilbeams.sh");
+  no("beams.sh.evil.com");
+  no("evil.com");
+  no("quiet-hat.beams.sh:8443");
+  no("user@quiet-hat.beams.sh");
+  no("quiet-hat.beams.sh/x");
+  no("https://quiet-hat.beams.sh");
+  no("Quiet-Hat.beams.sh"); // must already be lowercase
+  no("quiet-hat.beams.sh.");
+  no("-x.beams.sh");
+  no("127.0.0.1");
+  no("");
+  no(undefined);
+  no("quiet-hat.beams.sh", []); // empty list turns the feature off
+  no("quiet-hat.beams.sh", ["example.com"]);
+
+  const line = text("teleport-user-ca.txt").trim();
+  const ents = cafetch.parseExport(line + "\n", "jeff.beams.sh");
+  ok("export line parsed", ents.length === 1 && ents[0].fetchedFrom === "jeff.beams.sh", JSON.stringify(ents));
+  ok(
+    "a line naming another cluster is dropped",
+    cafetch.parseExport(line, "other.beams.sh").length === 0
+  );
+  ok("junk yields no CAs", cafetch.parseExport("<html>nope</html>", "jeff.beams.sh").length === 0);
+  ok(
+    "export URL is https and on the asked host",
+    cafetch.exportUrl("quiet-hat.beams.sh") === "https://quiet-hat.beams.sh/webapi/auth/export?type=user"
+  );
+}
+
+console.log("\nfetched CA, and which cluster is authoritative");
+{
+  const { cafetch } = globalThis.Beamsig;
+  const ents = cafetch.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh");
+  const good = await verify.loadPinnedCAs(ents);
+  const att = await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), good, {
+    namespace: "git", claimedTime: INSIDE_WINDOW,
+  });
+  ok("verifies against a fetched CA", att.ok && att.caFetchedFrom === "jeff.beams.sh");
+  ok("flagged as not pinned in warnings", att.warnings.some((w) => w.includes("not pinned")));
+  // Authoritative cluster = the one bound to the verifying CA, not the claim.
+  ok("cluster comes from the CA's label", att.cluster === "jeff.beams.sh" && att.clusterPinned && att.clusterClaimed === "jeff.beams.sh");
+  const other = await verify.loadPinnedCAs(
+    cafetch.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh").map((e) => ({ ...e, cluster: "other.beams.sh", fetchedFrom: "" }))
+  );
+  const att2 = await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), other, {
+    namespace: "git", claimedTime: INSIDE_WINDOW,
+  });
+  ok("a disagreeing claim is not authoritative", att2.cluster === "other.beams.sh" && att2.clusterClaimed === "jeff.beams.sh");
+  ok("...and is surfaced as a warning, not a failure", att2.ok && att2.warnings.some((w) => w.includes("treating")));
+  // An untrusted-CA failure carries the (unauthenticated) cluster hint.
+  try {
+    await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), [{ ...cas[0], blob: new Uint8Array(cas[0].blob).reverse() }], {});
+    ok("untrusted CA throws", false);
+  } catch (e) {
+    ok("untrusted-ca error carries clusterHint", e.code === "untrusted-ca" && e.clusterHint === "jeff.beams.sh", `${e.code} ${e.clusterHint}`);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -1,3 +1,6 @@
+// Robot generator: designed and written by Jeff (jeff@goteleport.com) as
+// tools/avatar/teleport_avatar.py. This file is its JS port.
+//
 // Deterministic seed -> robot avatar SVG (a Teleport-mascot-flavoured
 // "gravatar"). Faithful JS port of tools/avatar/teleport_avatar.py (VERSION
 // v2); that file is the source of truth. test/avatar-golden.json holds SVGs

@@ -35,6 +35,60 @@
     return casPromise;
   }
 
+  // ---- CAs fetched on demand ------------------------------------------------
+
+  // Only reached when no pinned CA matched. See lib/cafetch.js for why this is
+  // sound: we ask only clusters under a trusted domain, and verify.js then
+  // requires the cluster inside the signed certificate to be the one we asked.
+  const CA_TTL_MS = 60 * 60 * 1000;
+  const caFetches = new Map(); // cluster -> Promise<entries>
+
+  class CAFetchError extends Error {}
+
+  function askBackground(cluster) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage({ type: "beamsig:fetch-ca", cluster }, (res) => {
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!res || !res.ok) return reject(new Error((res && res.error) || "no answer"));
+          resolve(res.text);
+        });
+      } catch (e) {
+        reject(e); // e.g. no extension context (console bundle)
+      }
+    });
+  }
+
+  function fetchClusterCAs(cluster) {
+    if (!caFetches.has(cluster)) {
+      const p = (async () => {
+        const key = `ca:${cluster}`;
+        let text = null;
+        try {
+          const got = (await chrome.storage.local.get(key))[key];
+          if (got && Date.now() - got.fetchedAt < CA_TTL_MS) text = got.text;
+        } catch (e) { /* no storage: just fetch */ }
+        if (text === null) {
+          try {
+            text = await askBackground(cluster);
+          } catch (e) {
+            throw new CAFetchError(e.message);
+          }
+          try {
+            await chrome.storage.local.set({ [key]: { text, fetchedAt: Date.now() } });
+          } catch (e) { /* not fatal */ }
+        }
+        const entries = ns.cafetch.parseExport(text, cluster);
+        if (!entries.length) throw new CAFetchError(`no CA found in ${cluster}'s export`);
+        return verify.loadPinnedCAs(entries);
+      })();
+      // Don't cache failures: a transient network error must not stick.
+      p.catch(() => caFetches.delete(cluster));
+      caFetches.set(cluster, p);
+    }
+    return caFetches.get(cluster);
+  }
+
   // ---- verification ---------------------------------------------------------
 
   // Returns {state, att?, message?} where state is one of:
@@ -61,20 +115,51 @@
     const cas = await loadCAs(settings);
     const payloadBytes = ns.wire.TE.encode(record.payload || "");
     const ct = github.committerTime(record.payload || "");
-
-    try {
-      const att = await verify.verifySSHSig(record.signature, payloadBytes, cas, {
+    const attempt = (list) =>
+      verify.verifySSHSig(record.signature, payloadBytes, list, {
         namespace: "git",
         claimedTime: ct ? ct.timestamp : undefined,
         claimedTimeSource: "git committer date",
       });
-      return { state: "verified", att, record };
-    } catch (e) {
+
+    const classify = (e) => {
       const msg = e.message || String(e);
       // Distinguish "this is somebody else's signature, which is fine" from
       // "this looks like a beam signature and something is wrong".
-      const notOurs = verify.NOT_BEAM_CODES.has(e.code);
-      return { state: notOurs ? "notbeam" : "failed", message: msg, record };
+      return { state: verify.NOT_BEAM_CODES.has(e.code) ? "notbeam" : "failed", message: msg, record };
+    };
+
+    try {
+      return { state: "verified", att: await attempt(cas), record };
+    } catch (e) {
+      const cluster = e.code === "untrusted-ca" ? e.clusterHint : "";
+      const domains = settings.trustedDomains;
+      if (!cluster || !ns.cafetch.isTrustedCluster(cluster, domains)) return classify(e);
+
+      // No pinned CA matched, but the cert names a cluster we are willing to ask.
+      let fetched;
+      try {
+        fetched = await fetchClusterCAs(cluster);
+      } catch (fe) {
+        log("CA fetch failed", cluster, fe.message);
+        const r = classify(e);
+        r.message += ` (could not fetch ${cluster}'s CA: ${fe.message})`;
+        return r;
+      }
+      try {
+        return { state: "verified", att: await attempt(fetched), record };
+      } catch (e2) {
+        if (e2.code === "untrusted-ca") {
+          // It claims a trusted cluster but that cluster's CA did not sign it.
+          // That is not "someone else's signature": it is a false claim.
+          return {
+            state: "failed",
+            message: `certificate claims cluster ${cluster} but is not signed by its CA`,
+            record,
+          };
+        }
+        return classify(e2);
+      }
     }
   }
 

@@ -78,6 +78,9 @@
         blob: cert,
         fingerprint: fp,
         userAdded: !!entry.userAdded,
+        // Set only for a CA fetched on demand (see cafetch.js): the host it came from.
+        fetchedFrom: entry.fetchedFrom || "",
+        fetchedFrom: entry.fetchedFrom || "",
       });
     }
     if (!out.length) throw new VerifyError("no pinned CAs configured");
@@ -108,6 +111,8 @@
       principals: [],
       loginIp: "",
       cluster: "",
+      clusterClaimed: "",
+      clusterPinned: false,
       signingKeyFp: "",
       caFp: "",
       certSerial: 0,
@@ -170,16 +175,30 @@
     }
     if (!matched) {
       const certCaFp = await fingerprint(cert.signatureKey);
-      throw new VerifyError(
+      const err = new VerifyError(
         "certificate is not signed by any pinned Teleport user CA " +
           `(certificate says CA=${certCaFp}; pinned=${cas
             .map((c) => c.fingerprint)
             .join(", ")})`,
         "untrusted-ca"
       );
+      // UNAUTHENTICATED: the cluster the cert claims, read before its chain is
+      // checked. It may only be used to decide where to fetch a CA from (and
+      // only from a trusted domain); never displayed as fact.
+      const hint = cert.extensions.get(ROUTE_EXT);
+      err.clusterHint = hint && hint.length ? TD.decode(hint) : "";
+      throw err;
     }
     att.caFp = matched.fingerprint;
     att.caCluster = matched.cluster;
+    att.caFetchedFrom = matched.fetchedFrom || "";
+    if (att.caFetchedFrom) {
+      att.warnings.push(
+        `the trust anchor was fetched from ${att.caFetchedFrom} over HTTPS when ` +
+          "this was verified, not pinned: it is only as trustworthy as that " +
+          "host's TLS and the trusted-domain list in the extension options"
+      );
+    }
     att.caUserAdded = !!matched.userAdded;
     if (att.caUserAdded) {
       att.warnings.push(
@@ -228,7 +247,27 @@
     att.owner = cert.keyId; // the impersonated human, NOT the signer
     att.principals = cert.validPrincipals;
     att.loginIp = ext(LOGIN_IP_EXT);
-    att.cluster = ext(ROUTE_EXT);
+    // The certificate's cluster extension is only a CLAIM, made by whoever
+    // signed it. The authoritative cluster is the one bound to the CA that
+    // verified the certificate (same rule as beamsig/verify.py): with two
+    // tenants trusted, either could otherwise mint a cert claiming to be the
+    // other. A disagreement is a warning, not an error, because a root/leaf
+    // trusted-cluster setup legitimately routes to a different cluster than the
+    // one that signed.
+    att.clusterClaimed = ext(ROUTE_EXT);
+    att.cluster = matched.cluster || att.clusterClaimed;
+    att.clusterPinned = !!matched.cluster;
+    if (!matched.cluster) {
+      att.warnings.push(
+        "the trust anchor carries no cluster label, so the cluster name " +
+          `"${att.clusterClaimed}" is taken from the certificate and is not authoritative`
+      );
+    } else if (att.clusterClaimed && att.clusterClaimed !== matched.cluster) {
+      att.warnings.push(
+        `certificate claims cluster "${att.clusterClaimed}" but was signed by the ` +
+          `CA for "${matched.cluster}"; treating "${matched.cluster}" as authoritative`
+      );
+    }
 
     const rolesRaw = ext(ROLES_EXT);
     if (rolesRaw) {

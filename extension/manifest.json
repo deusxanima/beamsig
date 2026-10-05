@@ -4,7 +4,11 @@
   "version": "0.1.0",
   "description": "Detects and displays Teleport Beam signatures on GitHub commits, which GitHub itself reports as Unverified because it has no notion of an SSH certificate authority.",
   "permissions": ["storage"],
-  "host_permissions": ["https://api.github.com/*"],
+  "host_permissions": ["https://api.github.com/*", "https://*.beams.sh/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "scripts": ["src/lib/cafetch.js", "src/background.js"]
+  },
   "options_page": "src/options.html",
   "content_scripts": [
     {
@@ -18,6 +22,7 @@
         "src/lib/sshcrypto.js",
         "src/lib/ca.js",
         "src/lib/verify.js",
+        "src/lib/cafetch.js",
         "src/lib/avatar.js",
         "src/github.js",
         "src/ui.js",

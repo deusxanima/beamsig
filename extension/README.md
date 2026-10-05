@@ -64,7 +64,8 @@ node extension/tools/console-bundle.mjs | pbcopy
 
 Open a commit page on github.com, open DevTools → Console, type `allow pasting`
 and press Enter (Chrome's paste guard), then paste and press Enter. It runs the
-same scripts; nothing persists (no cache, token or extra CAs) and it lasts until
+same scripts; nothing persists (no cache, token or extra CAs, and no on-demand
+CA fetch, which needs the background worker) and it lasts until
 you reload the tab. Re-paste after each full page load.
 
 If nothing appears, open DevTools → Console and filter on `beamsig`; the line
@@ -127,9 +128,41 @@ certificate, chained to the pinned CA), **self-reported**, and **not checked**
 ## Trust anchor
 
 Pinned by value in `src/lib/ca.js`, exported from
-`GET https://<cluster>/webapi/auth/export?type=user`. It is **not** fetched at
-render time: that would trust the network instead of the pin, and the endpoint is
-not CORS-accessible from `github.com` anyway.
+`GET https://<cluster>/webapi/auth/export?type=user`. The pin is always tried
+first and is the strongest anchor. It is never fetched at render time *in place
+of* the pin; the on-demand fallback below applies only when no pin matches.
+
+**Clusters not pinned are fetched on demand.** A repo can hold beam commits from
+any tenant, so a CA shipped at install time is not enough. When no pinned CA
+matches, the extension reads the cluster name from the certificate
+(`teleport-route-to-cluster`, e.g. `quiet-hat.beams.sh`) and fetches
+`https://<cluster>/webapi/auth/export?type=user` through a background worker
+(the endpoint sends no CORS headers, so a page script cannot).
+
+The cluster name in a certificate is only a claim until the chain has been
+checked, so "trust whatever cluster the cert names" would let anyone run their
+own cluster and look verified. Two rules prevent that:
+
+1. Only clusters under a **trusted domain** are ever contacted (default
+   `beams.sh`, subdomains only, configurable in options; empty disables it). The
+   trust anchor is TLS to that host, not the cert's say-so. Requests carry no
+   cookies and follow no redirects.
+2. The **authoritative cluster is the one bound to the CA that verified the
+   cert** (here, the host it was fetched from), never the one the cert claims —
+   the same rule as `beamsig/verify.py`. A cert that names a trusted cluster but
+   is not signed by that cluster's CA is reported as **did NOT verify**, not as
+   someone else's signature. If a pinned CA verifies a cert that claims a
+   *different* cluster (legitimate in a root/leaf setup), the panel shows the
+   pinned cluster and lists the claim as "NOT authoritative", with a warning.
+
+This is weaker than a pin and the panel says so: the issuing CA reads "fetched
+from `<cluster>` · NOT pinned", with a matching warning. Pinned CAs are always
+tried first. Fetched CAs are cached for an hour so a rotation is picked up.
+
+The Python `beamsig verify` differs on purpose: the *operator* chooses the
+cluster (`TELEPORT_CLUSTER` / `--ca`), so the trust decision never comes from the
+signature being checked. A browser extension has no operator at verify time,
+which is why it needs the domain rule above.
 
 Additional CAs can be added in the options page for other clusters. A signature
 accepted by one of those is flagged in the panel as resting on a trust anchor the
@@ -246,6 +279,8 @@ node extension/test/make-preview-data.mjs
 | `src/lib/sshsig.js` | SSHSIG envelope parse + signed-data construction |
 | `src/lib/sshcrypto.js` | WebCrypto verification; mpint→`r‖s` and RSA→SPKI DER |
 | `src/lib/ca.js` | the pinned Teleport user CA, by value |
+| `src/lib/cafetch.js` | trusted-domain check and CA-export parsing for on-demand CA fetch |
+| `src/background.js` | background worker that fetches a cluster's CA (content scripts cannot: CORS) |
 | `src/lib/verify.js` | the beam-aware policy — port of `beamsig/verify.py` |
 | `src/lib/avatar.js` | deterministic robot avatar seeded by beam UUID — JS port of `tools/avatar/teleport_avatar.py` |
 | `src/github.js` | page routing, API fetch, cache, committer-date extraction |
@@ -266,6 +301,9 @@ node extension/test/make-preview-data.mjs
 step; the checks are in the same order in both, with the same messages.
 
 ## Beam avatars
+
+The robot generator is Jeff's work (jeff@goteleport.com); the JS port and the
+extension wiring build on it.
 
 Each beam gets a generated robot (grey paneled body, coloured highlights), seeded
 by its UUID, shown in the panel header and in list badges so the same beam is

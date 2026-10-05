@@ -100,10 +100,13 @@
 
 .beamsig-section {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--bs-border);
 }
 
-.beamsig-section:last-of-type { border-bottom: none; }
+/* Separators between sections only. The head and the footer draw their own, so
+   a border on the last section would double up against the footer's. */
+.beamsig-section + .beamsig-section {
+  border-top: 1px solid var(--bs-border);
+}
 
 .beamsig-section-title {
   font-size: 10px;
