@@ -154,9 +154,9 @@ def build_install(ascii_only=False):
     c.lines(f"""
 {BOLD}== installing requirements =={R}
 {BOLD}== generating hardware key agent gRPC stubs =={R}
-{BOLD}== pinning the Teleport SSH user CA =={R}
+{BOLD}== pinning Teleport SSH user CAs =={R}
 """, pause=0.5)
-    c.line(f"   {GREY}~/.config/beamsig/pinned-user-ca.txt{R}")
+    c.line(f"   {GREY}~/.config/beamsig/trusted/jeff.beams.sh.ca{R}")
     c.line(f"   {GREY}SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU{R}")
     c.wait(0.3)
     c.line(f"{BOLD}== writing ~/.gitconfig =={R}").wait(0.5)
@@ -182,6 +182,12 @@ def build_install(ascii_only=False):
     c.prompt(beam).type("git config --global commit.gpgsign")
     c.wait(0.3)
     c.line(f"{BOLD}{GREEN}true{R}")
+    c.wait(0.9)
+    c.prompt(beam).type("beamsig trust --list")
+    c.wait(0.4)
+    c.line(f"{GREY}trust store: ~/.config/beamsig/trusted{R}")
+    c.line(f"  {BOLD}jeff.beams.sh{R}  "
+           f"{GREY}SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU{R}")
     c.wait(0.6)
     c.prompt(beam)
     c.wait(2.6)                            # breathing room before the loop
@@ -218,8 +224,9 @@ def build_commit(ascii_only=False):
         f"{YELLOW}(impersonated, NOT the signer){R}",
         f"  {GREY}cert window  {R} 2026-10-05T17:16:27Z .. 2026-10-05T18:17:27Z",
         f"  {GREY}commit time  {R} 2026-10-05T17:19:52Z  {GREEN}in window{R}",
-        f"  {GREY}teleport CA  {R} SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU"
-        f"  {GREY}(jeff.beams.sh){R}",
+        f"  {GREY}signing key  {R} SHA256:FVjefo3vO1p2S4vBcRzXBMESHU+n1s0SDom8mmEJSmw",
+        f"  {GREY}cluster      {R} jeff.beams.sh",
+        f"  {GREY}teleport CA  {R} SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU",
     ]:
         c.line(ln, pause=0.16)
     c.wait(0.3)
