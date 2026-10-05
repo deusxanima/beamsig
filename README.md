@@ -139,6 +139,7 @@ word `Good` on a line *before* failing, so never grep for it.
 |---|---|
 | `REPORT.md` | the findings write-up — start here |
 | `docs/PRESENTATION-NOTES.md` | hand-off note for a UI / presentation layer, incl. the GitHub userscript route |
+| `extension/` | browser extension: shows beam signatures on GitHub, which reports them `unverified` |
 | `beamsig/` | the library (see below) |
 | `bin/beamsig` | CLI: `sign`, `verify`, `verify-commit`, `attest`, `verify-attestation`, `inspect` |
 | `bin/git-beamsig-keygen` | drop-in `gpg.ssh.program`: beam-aware `git log` / `git verify-commit`, and rotation-proof signing |

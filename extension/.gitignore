@@ -1,0 +1,5 @@
+node_modules/
+package-lock.json
+# Screenshots written by test/chrome-check.mjs. Regenerate with:
+#   node extension/test/chrome-check.mjs
+test/*.png
