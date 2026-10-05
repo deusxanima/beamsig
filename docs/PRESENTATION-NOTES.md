@@ -68,9 +68,16 @@ beamsig verify-commit <sha> -C <repo> --ca <pinned-ca> --beam-id <uuid> --json
 }
 ```
 
-Exit code is the contract: `0` verified, `2` failed. `ok` is never `true` on a
-failure path. Also render `warnings[]` — it is where we put "this was not
-checked" rather than silently omitting it.
+Exit code is the contract: `0` verified, `2` invalid, **`3` untrusted tenant**.
+`ok` is never `true` on a failure path. Also render `warnings[]` — it is where
+we put "this was not checked" rather than silently omitting it.
+
+**Treat 3 as a third state, not an error.** A repository can hold commits from
+several Beams tenants, and one whose CA you have not pinned is *not* a bad
+signature — git itself reports `%G?` = `U`, good signature with unknown trust.
+Show it as "unknown tenant" with the cluster and beam it *claims* (both clearly
+unverified), not as tampering. stderr carries the claimed cluster and the
+command to pin it.
 
 The same tool does artifacts (`beamsig verify`) and multi-subject attestation
 bundles (`beamsig verify-attestation`), with the same JSON shape.

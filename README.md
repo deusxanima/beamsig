@@ -90,6 +90,56 @@ Stock `ssh-keygen` cannot do any of this: `allowed_signers` has no way to say
 which cluster a `cert-authority` line belongs to, so with several tenants
 listed it cannot tell them apart.
 
+## Commits from several tenants in one repository
+
+This works, and it is worth knowing exactly what you see. A commit whose
+issuing CA is not pinned is reported as `%G?` = **`U`** — *good signature,
+unknown trust* — not `B`. Nothing is wrong with the bytes; there is simply no
+basis for trusting the tenant. Stock `ssh-keygen` says only
+`No principal matched.`, so `beamsig` explains it instead:
+
+```
+Good "git" signature with ECDSA-CERT key SHA256:qoOp6kLYO6Fq3b3H2pihOAxceLdem6G04adObAuSdmk
+UNTRUSTED TENANT: the signature is intact, but its Teleport CA is not pinned here.
+  claims cluster  other.example.sh  (unverified: this comes from the certificate itself)
+  claims beam     5d41402a-bc4b-2a76-b971-9d911017c592  (unverified)
+  issuing CA      SHA256:48TyCfGeffUJFJ8EF60O5RtCnnoFQ8oanLMqS3xy/rU
+  to trust it     beamsig trust other.example.sh
+```
+
+`beamsig verify*` exits **3** for an untrusted tenant, distinct from **2** for
+an invalid signature, so CI and UIs can tell "we don't know them" from "this is
+broken".
+
+### Lazy loading, and why it is off by default
+
+A CA *can* be fetched on demand, because the certificate names the cluster it
+came from. But that name comes from the artifact being verified, so fetching a
+trust anchor it names is circular: anyone can mint their own CA and a
+certificate claiming `teleport-route-to-cluster=evil.example.com`, and
+discovery would dutifully fetch evil.example.com's CA and validate it. The
+result shows the signer controls a Teleport cluster at that hostname — it is
+**not** the same statement as a pin an operator chose.
+
+So discovery is opt-in and fenced:
+
+```bash
+beamsig verify-commit <sha> --discover-allow '*.beams.sh'
+export BEAMSIG_DISCOVER_ALLOW='*.beams.sh,*.corp.example'
+```
+
+* off unless an allowlist is given — no allowlist, no fetch;
+* the cluster name must match a glob *and* be a syntactically valid hostname;
+* trust-on-first-use: the CA is written to the store and pinned from then on;
+* an existing pin is **never** silently overwritten — a changed CA is reported,
+  not accepted;
+* the first use is reported as unauthenticated, with the fingerprint to confirm
+  out of band.
+
+For a team whose tenants are all its own, `--discover-allow '*.yourdomain'` is
+reasonable. Otherwise pin deliberately with `beamsig trust <cluster>`. See
+`beamsig/discover.py`.
+
 ## Biggest caveat
 
 The beam key **never rotates** — only the certificate does, every 20 minutes,

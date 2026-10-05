@@ -43,6 +43,25 @@ class VerifyError(Exception):
     """Verification failed. The message says exactly which check failed."""
 
 
+class UnknownTenant(VerifyError):
+    """The signature is self-consistent but its issuing CA is not pinned.
+
+    Distinct from a bad signature: nothing is wrong with the bytes, we simply
+    have no basis for trusting the tenant that issued the certificate. Callers
+    should report this differently from tampering, and may offer to pin the
+    cluster -- see beamsig.discover.
+    """
+
+    def __init__(self, message, cluster_claimed="", beam_id="", bot_name="",
+                 ca_fp="", signing_key_fp=""):
+        super().__init__(message)
+        self.cluster_claimed = cluster_claimed
+        self.beam_id = beam_id
+        self.bot_name = bot_name
+        self.ca_fp = ca_fp
+        self.signing_key_fp = signing_key_fp
+
+
 @dataclass
 class Attestation:
     ok: bool = False
@@ -132,7 +151,7 @@ def _parse_anchors(text: str, source: str, label: str = "") -> list:
     return out
 
 
-def load_trust_anchors(sources) -> list:
+def load_trust_anchors(sources, allow_empty: bool = False) -> list:
     """Build a trust store from files, directories and/or export URLs.
 
     A directory is treated as a trust store: every file in it is a pin, and the
@@ -166,7 +185,7 @@ def load_trust_anchors(sources) -> list:
             with open(src) as f:
                 anchors += _parse_anchors(f.read(), src,
                                           label or _cluster_from_name(src))
-    if not anchors:
+    if not anchors and not allow_empty:
         raise VerifyError(f"no SSH CA public keys found in {sources}")
     return anchors
 
@@ -229,10 +248,37 @@ def verify_sshsig(sig_bytes: bytes, payload: bytes, trust,
         except (InvalidSignature, ValueError):
             continue
     if matched is None:
+        # Before reporting anything, establish whether the signature is at
+        # least internally consistent: does it verify against the public key in
+        # the certificate it carries? If so this is an untrusted tenant rather
+        # than a corrupt signature, and saying so is the difference between
+        # "someone tampered with this" and "we have never heard of that
+        # cluster".
+        self_ok = False
+        try:
+            sdata0 = sshsig.signed_data(s.namespace, s.hash_algorithm, payload,
+                                        s.reserved)
+            sshcrypto.verify(cert.pubkey_blob, s.signature, sdata0)
+            self_ok = True
+        except Exception:
+            self_ok = False
+        claimed = (cert.extensions.get(ROUTE_EXT, b"") or b"").decode("utf-8", "replace")
+        bot = (cert.extensions.get(BOT_NAME_EXT, b"") or b"").decode("utf-8", "replace")
+        m0 = BEAM_BOT_RE.match(bot or "")
+        trusted = [(a.cluster or "?", a.fingerprint) for a in anchors]
+        if self_ok:
+            raise UnknownTenant(
+                "the signature is intact, but its issuing Teleport user CA "
+                f"({cert.ca_fingerprint}) is not pinned. The certificate says "
+                f"it came from cluster {claimed or '(unstated)'!r}. Pin that "
+                "cluster to verify it, e.g. `beamsig trust "
+                f"{claimed or '<cluster>'}`. Currently trusted: {trusted}",
+                cluster_claimed=claimed, beam_id=(m0.group(1) if m0 else ""),
+                bot_name=bot, ca_fp=cert.ca_fingerprint,
+                signing_key_fp=cert.key_fingerprint)
         raise VerifyError(
             "certificate is not signed by any trusted Teleport user CA "
-            f"(cert says CA={cert.ca_fingerprint}, trusted="
-            f"{[(a.cluster or '?', a.fingerprint) for a in anchors]})")
+            f"(cert says CA={cert.ca_fingerprint}, trusted={trusted})")
     att.ca_fp = cert.ca_fingerprint
     att.signing_key_fp = cert.key_fingerprint
     att.cert_serial = cert.serial

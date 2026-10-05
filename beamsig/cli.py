@@ -8,7 +8,8 @@ import os
 import subprocess
 import sys
 
-from . import attest as attest_mod, gitobj, identity as ident_mod, sshsig, verify as vmod
+from . import attest as attest_mod, discover as disc_mod, gitobj, \
+    identity as ident_mod, sshsig, verify as vmod
 from .hwagent import HardwareKeyAgent, HASH_SHA256
 from .sshagentshim import der_to_ssh_ecdsa_sig
 from .wire import Reader
@@ -69,7 +70,7 @@ def _trust(a):
     the local cluster's export."""
     sources = list(a.ca or [])
     if not sources:
-        if os.path.isdir(DEFAULT_TRUST_STORE) and os.listdir(DEFAULT_TRUST_STORE):
+        if os.path.isdir(DEFAULT_TRUST_STORE):
             sources = [DEFAULT_TRUST_STORE]
         elif LOCAL_CA_URL:
             sources = [LOCAL_CA_URL]
@@ -77,7 +78,53 @@ def _trust(a):
             raise SystemExit(
                 "no trust anchors: pass --ca <file|dir|url>, populate "
                 f"{DEFAULT_TRUST_STORE}, or set TELEPORT_CLUSTER")
-    return vmod.load_trust_anchors(sources)
+    # Tolerate an empty store: when discovery is enabled, starting with no
+    # anchors is legitimate and verification will raise UnknownTenant, which
+    # is what triggers the fetch.
+    return vmod.load_trust_anchors(sources, allow_empty=True)
+
+
+def _verify_with_discovery(a, fn):
+    """Run `fn(anchors)`; on an unknown tenant, optionally pin and retry once.
+
+    Exit codes: 0 verified, 2 invalid, 3 untrusted tenant. 3 is distinct on
+    purpose -- "we do not trust that tenant" is a different outcome from "this
+    signature is bad", and callers (CI, a UI) should be able to tell them
+    apart.
+    """
+    anchors = _trust(a)
+    store = a.trust_store or DEFAULT_TRUST_STORE
+    patterns = disc_mod.allow_patterns(getattr(a, "discover_allow", None))
+    try:
+        return fn(anchors)
+    except vmod.UnknownTenant as e:
+        if not patterns:
+            print(f"BEAMSIG UNTRUSTED TENANT: {e}", file=sys.stderr)
+            return 3
+        try:
+            new = disc_mod.discover(e.cluster_claimed, store, patterns)
+        except disc_mod.DiscoveryRefused as refused:
+            print(f"BEAMSIG UNTRUSTED TENANT: {e}", file=sys.stderr)
+            print(f"  discovery not attempted: {refused}", file=sys.stderr)
+            return 3
+        except Exception as fetch_err:
+            print(f"BEAMSIG UNTRUSTED TENANT: {e}", file=sys.stderr)
+            print(f"  discovery failed: {fetch_err}", file=sys.stderr)
+            return 3
+        print(f"NOTE: discovered and pinned {e.cluster_claimed} "
+              f"({', '.join(x.fingerprint for x in new)}) at "
+              f"{disc_mod.pin_path(store, e.cluster_claimed)}", file=sys.stderr)
+        print("      First use was unauthenticated: the cluster name came from "
+              "the certificate being verified. Confirm that fingerprint out of "
+              "band.", file=sys.stderr)
+        try:
+            return fn(anchors + new)
+        except vmod.VerifyError as e2:
+            print(f"BEAMSIG VERIFY FAILED: {e2}", file=sys.stderr)
+            return 2
+    except vmod.VerifyError as e:
+        print(f"BEAMSIG VERIFY FAILED: {e}", file=sys.stderr)
+        return 2
 
 
 def _emit(att, as_json):
@@ -91,17 +138,17 @@ def _emit(att, as_json):
 def cmd_verify(a):
     data = sys.stdin.buffer.read() if a.file == "-" else open(a.file, "rb").read()
     sig = open(a.signature, "rb").read()
-    try:
+
+    def run(anchors):
         att = vmod.verify_sshsig(
-            sig, data, _trust(a), namespace=a.namespace,
+            sig, data, anchors, namespace=a.namespace,
             claimed_time=a.claimed_time, claimed_time_source="--claimed-time",
             require_beam=not a.allow_non_beam, expect_beam_id=a.beam_id,
             expect_cluster=a.cluster)
-    except vmod.VerifyError as e:
-        print(f"BEAMSIG VERIFY FAILED: {e}", file=sys.stderr)
-        return 2
-    _emit(att, a.json)
-    return 0
+        _emit(att, a.json)
+        return 0
+
+    return _verify_with_discovery(a, run)
 
 
 def cmd_verify_commit(a):
@@ -115,15 +162,20 @@ def cmd_verify_commit(a):
         return 2
     meta = gitobj.commit_metadata(obj)
     ctime = meta.get("committer", {}).get("timestamp")
-    try:
+
+    def run(anchors):
         att = vmod.verify_sshsig(
-            sig, payload, _trust(a), namespace="git",
+            sig, payload, anchors, namespace="git",
             claimed_time=ctime, claimed_time_source="git committer date",
             require_beam=not a.allow_non_beam, expect_beam_id=a.beam_id,
             expect_cluster=a.cluster)
-    except vmod.VerifyError as e:
-        print(f"BEAMSIG VERIFY FAILED for commit {rev}: {e}", file=sys.stderr)
-        return 2
+        _emit_commit(a, att, rev, meta)
+        return 0
+
+    return _verify_with_discovery(a, run)
+
+
+def _emit_commit(a, att, rev, meta):
     if a.json:
         d = dataclasses.asdict(att)
         d["commit"] = rev
@@ -134,7 +186,6 @@ def cmd_verify_commit(a):
         print(f"commit               : {rev}")
         print(f"committer            : {meta.get('committer', {}).get('identity')}")
         print(vmod.render(att))
-    return 0
 
 
 def cmd_attest(a):
@@ -165,16 +216,18 @@ def cmd_verify_attestation(a):
     except ValueError as e:
         print(f"BEAMSIG VERIFY FAILED: {e}", file=sys.stderr)
         return 2
-    try:
+    def run(anchors):
         att = vmod.verify_sshsig(
-            sig, raw, _trust(a), namespace=attest_mod.NAMESPACE,
+            sig, raw, anchors, namespace=attest_mod.NAMESPACE,
             claimed_time=a.claimed_time, claimed_time_source="--claimed-time",
             require_beam=not a.allow_non_beam, expect_beam_id=a.beam_id,
             expect_cluster=a.cluster)
-    except vmod.VerifyError as e:
-        print(f"BEAMSIG VERIFY FAILED: {e}", file=sys.stderr)
-        return 2
+        return _finish_attestation(a, att, stmt)
 
+    return _verify_with_discovery(a, run)
+
+
+def _finish_attestation(a, att, stmt):
     # check the subject digests against files on disk, if asked
     problems = []
     if a.subject_dir:
@@ -244,7 +297,11 @@ def cmd_trust(a):
             print(f"{store} does not exist; nothing trusted")
             return 0
         print(f"trust store: {store}")
-        for anchor in vmod.load_trust_anchors([store]):
+        anchors = vmod.load_trust_anchors([store], allow_empty=True)
+        if not anchors:
+            print("  (empty: no clusters pinned)")
+            return 0
+        for anchor in anchors:
             print(f"  {anchor.cluster or '(unlabelled)':40s} "
                   f"{anchor.fingerprint}  {os.path.basename(anchor.source)}")
         return 0
@@ -275,6 +332,12 @@ def main(argv=None):
                             "cluster=path. Repeatable; defaults to "
                             f"{DEFAULT_TRUST_STORE}")
         q.add_argument("--cluster", help="require this exact Teleport cluster")
+        q.add_argument("--trust-store", help="where discovered pins are written")
+        q.add_argument("--discover-allow", action="append", metavar="GLOB",
+                       help="permit fetching the CA for an unpinned cluster "
+                            "whose name matches GLOB, e.g. '*.beams.sh'. The "
+                            "name comes from the certificate being verified, "
+                            "so read beamsig/discover.py first. Repeatable.")
         q.add_argument("--beam-id", help="require this exact beam id")
         q.add_argument("--allow-non-beam", action="store_true",
                        help="accept any Teleport user cert, not just beams")
