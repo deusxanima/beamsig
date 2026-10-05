@@ -1,0 +1,1 @@
+* cert-authority ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBC2rt1luLsu92AtID5MrxjSSDK6HqeJbKzERdXu/8MLHr5kcohFzhTpJvUlqx9cNuWUEkdLZs/f0YlCAytnHluo= teleport-user-ca jeff.beams.sh clustername=jeff.beams.sh&type=user

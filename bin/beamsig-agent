@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run the beamsig ssh-agent shim in the foreground.
+#   beamsig-agent [socket-path]
+set -euo pipefail
+LAB="${BEAMSIG_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export BEAMSIG_HOME="$LAB"
+if [ ! -x "$LAB/venv/bin/python" ]; then
+  echo "beamsig-agent: venv missing, run $LAB/bin/setup.sh" >&2
+  exit 1
+fi
+exec "$LAB/venv/bin/python" -c '
+import os, sys
+home = os.environ["BEAMSIG_HOME"]
+sys.path.insert(0, home)
+from beamsig import sshagentshim
+path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(home, "run", "agent.sock")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+srv = sshagentshim.serve(path)
+print("beamsig ssh-agent listening on", path, flush=True)
+srv.serve_forever()
+' "$@"

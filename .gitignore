@@ -1,0 +1,37 @@
+# --- build / runtime, regenerate with bin/setup.sh ---
+venv/
+gen/
+__pycache__/
+*.pyc
+
+# --- runtime state ---
+run/
+ca/
+
+# --- DELIBERATELY NOT COMMITTED ---------------------------------------------
+# Copies of the live tbot identity file. These contain the beam's SSH and X.509
+# certificates (and the owner's email, roles and login IP). No private key can
+# be in them -- the beam key is non-exportable -- but they are credential files,
+# they trip secret scanners on the "BEGIN PIV YUBIKEY PRIVATE KEY" header, and
+# the certs expire 61 minutes after issue anyway. Reproduce with
+# bin/watch-renewal.py.
+archive/
+inventory/
+
+# Throwaway CA and user keys used by the negative tests. bin/negative-tests.sh
+# regenerates them on every run; never commit private keys, even test ones.
+exp5/
+testkeys/
+
+# Scratch working directories for the experiments.
+exp2/
+exp6/
+exp6x/
+exp-attest/
+exp-backdate/
+
+# Nested git repositories created by the experiments.
+repos/
+
+# runtime log of the ssh-agent shim
+logs/agent.log

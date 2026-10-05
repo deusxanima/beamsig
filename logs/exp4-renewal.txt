@@ -1,0 +1,75 @@
+=== experiment 4 renewal test, started Mon Oct  5 15:12:12 UTC 2026 ===
+[15:12:12Z] committed d1e5ee9  'gen-A (first cert generation)'  cert window 14:56:27Z..15:57:27Z
+error: Signing file /tmp/.git_signing_buffer_tmp9UIrS1
+Couldn't sign message (signer): agent refused operation?
+Signing /tmp/.git_signing_buffer_tmp9UIrS1 failed: agent refused operation?
+
+fatal: failed to write commit object
+[15:17:05Z] committed d1e5ee9  'gen-B (after tbot renewal)'  cert window 14:56:27Z..15:57:27Z
+[15:19:37Z] committed 12098ec  'gen-B (after tbot renewal, shim reloads cert)'  cert window 15:16:27Z..16:17:27Z
+
+=== verification pass at 15:19:46Z ===
+./bin/exp4-renewal.sh: line 67: [: cert generation) 1791212187 1791215847: integer expression expected
+---------------------------------------------------------------
+commit d1e5ee9  (gen-A)
+date: invalid date ‘@(first’
+date: invalid date ‘@cert generation) 1791212187 1791215847’
+  signing cert: ..  [VALID]
+  git verify-commit  : rc=0  Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  beamsig verify-commit: rc=0    result               : VERIFIED
+./bin/exp4-renewal.sh: line 67: [: tbot renewal, shim reloads cert) 1791213387 1791217047: integer expression expected
+---------------------------------------------------------------
+commit 12098ec  (gen-B)
+date: invalid date ‘@(after’
+date: invalid date ‘@tbot renewal, shim reloads cert) 1791213387 1791217047’
+  signing cert: ..  [VALID]
+  git verify-commit  : rc=0  Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  beamsig verify-commit: rc=0    result               : VERIFIED
+
+=== verification pass at 15:19:53Z ===
+---------------------------------------------------------------
+commit d1e5ee9  (gen-A (first cert generation))
+  signing cert: 14:56:27Z..15:57:27Z  [VALID]
+  git verify-commit  : rc=0  Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  beamsig verify-commit: rc=0    result               : VERIFIED
+---------------------------------------------------------------
+commit 12098ec  (gen-B (after tbot renewal, shim reloads cert))
+  signing cert: 15:16:27Z..16:17:27Z  [VALID]
+  git verify-commit  : rc=0  Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  beamsig verify-commit: rc=0    result               : VERIFIED
+
+###############################################################
+# POST-EXPIRY VERIFICATION  15:39:05Z
+###############################################################
+## repos/demo HEAD~2 (51fbefe) was signed with cert 14:36:27..15:37:27
+## that certificate is now EXPIRED. Does the commit still verify?
+--- git verify-commit ---
+Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+rc=0
+--- beamsig verify-commit ---
+  result               : VERIFIED
+  cert valid after     : 1791210987 2026-10-05T14:36:27+00:00
+  cert valid before    : 1791214647 2026-10-05T15:37:27+00:00
+  claimed time         : 1791212319 2026-10-05T14:58:39+00:00  (from git committer date)
+  claimed time in window: yes
+rc=0
+
+--- ssh-keygen -Y verify with verify-time = NOW (no commit context) ---
+allowed_signers:1: certificate not authorized: Certificate invalid: expired
+Could not verify signature.
+rc=255
+(sig-from-cert.sig used the same 14:36:27..15:37:27 cert; with no
+ -Overify-time, ssh-keygen defaults to NOW and must now reject it)
+
+=== verification pass at 15:39:06Z ===
+---------------------------------------------------------------
+commit d1e5ee9  (gen-A (first cert generation))
+  signing cert: 14:56:27Z..15:57:27Z  [VALID]
+  git verify-commit  : rc=0  Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  beamsig verify-commit: rc=0    result               : VERIFIED
+---------------------------------------------------------------
+commit 12098ec  (gen-B (after tbot renewal, shim reloads cert))
+  signing cert: 15:16:27Z..16:17:27Z  [VALID]
+  git verify-commit  : rc=0  Good "git" signature for root with ECDSA-CERT key SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  beamsig verify-commit: rc=0    result               : VERIFIED
+[driver] done

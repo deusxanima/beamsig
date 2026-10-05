@@ -1,0 +1,37 @@
+======================================================================
+FILE               : exp2/sig-from-key.sig  (387 bytes armored, 243 bytes raw)
+  SSHSIG version   : 1
+  namespace        : 'git'
+  hash algorithm   : sha512
+  reserved         : b''
+  publickey field  : 104 bytes, type=ecdsa-sha2-nistp256
+  inner sig alg    : ecdsa-sha2-nistp256
+  IS CERTIFICATE   : False
+
+======================================================================
+FILE               : exp2/sig-from-cert.sig  (2075 bytes armored, 1491 bytes raw)
+  SSHSIG version   : 1
+  namespace        : 'git'
+  hash algorithm   : sha512
+  reserved         : b''
+  publickey field  : 1351 bytes, type=ecdsa-sha2-nistp256-cert-v01@openssh.com
+  inner sig alg    : ecdsa-sha2-nistp256
+  IS CERTIFICATE   : True
+  --- certificate recovered FROM THE SIGNATURE ALONE ---
+    key id                 : jeff@goteleport.com
+    principals             : ['root', 'beams', '-teleport-internal-join']
+    valid                  : 2026-10-05T14:36:27+00:00 .. 2026-10-05T15:37:27+00:00
+    CA fingerprint         : SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU
+    ext bot-instance-id@goteleport.com         = dbe1cf6c-8f89-4ab3-bfee-9e2c7e710f6c
+    ext bot-name@goteleport.com                = beam-1786bcd6-04b9-4b9e-ad87-0c13071df7e9
+    ext delegation-session-id@goteleport.com   = bd204fe3-1653-429c-bc81-b64d5a3d514f
+    ext disallow-reissue                       = 
+    ext login-ip                               = 52.3.207.254
+    ext permit-agent-forwarding                = 
+    ext permit-port-forwarding                 = 
+    ext permit-pty                             = 
+    ext private-key-policy                     = none
+    ext teleport-roles                         = {"roles":["editor","access","auditor","beam-user"]}
+    ext teleport-route-to-cluster              = jeff.beams.sh
+    ext teleport-traits                        = {"aws_role_arns":null,"azure_identities":null,"db_names":null,"db_roles":null,"db_users":n
+

@@ -1,1 +1,135 @@
-BeamSign
+# beamsign
+
+Making work produced inside a **Teleport Beam** attestable to that specific
+beam — git commits first, arbitrary artifacts second — so that a third party
+holding only the Teleport cluster CA can later verify *"this was signed by beam
+`<BEAM_ID>`, owned by `<user>`, during `<time window>`"*, after the beam and its
+certificates are gone.
+
+**Read [`REPORT.md`](REPORT.md) first.** It is the findings write-up: what
+works, what it proves, what it does not, exact commands and output, and a list
+of papercuts and feature requests.
+
+## The one thing to know before reading any code
+
+The tbot identity file at `$TELEPORT_IDENTITY_FILE` contains **no private key**.
+The `BEGIN PIV YUBIKEY PRIVATE KEY` block is base64 JSON referencing PIV slot
+`0x9A` on a virtual hardware key with sentinel serial `0xFFFFFFFF`:
+
+```json
+{"serial_number":4294967295,"slot_key":154,
+ "policy":{"TouchRequired":false,"PINRequired":false},
+ "public_key":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."}
+```
+
+The key is non-exportable and lives behind Teleport's **hardware key agent**:
+gRPC **over TLS** on `$TELEPORT_KEY_AGENT_DIR/agent.sock`, with `cert.pem` in
+the same directory as the server certificate / pinned CA, and SNI `localhost`.
+There is no client authentication.
+
+So `ssh-keygen -Y sign -f <key>` and `openssl cms -sign -inkey <key>` cannot
+work. Everything here routes signatures through that agent.
+
+## Why a custom verifier is necessary
+
+`ssh-keygen -Y sign` with the Teleport **certificate** embeds the *entire
+certificate* — including `bot-name@goteleport.com` — in the SSHSIG blob, so a
+signature is self-contained and verifiable offline forever. But
+`ssh-keygen -Y verify` only matches certificate **principals**, which on a beam
+are the generic `root` / `beams`, shared by every user certificate in the
+cluster. It will report `Good "git" signature for root` for a certificate
+carrying a *forged* `bot-name`, because it never reads that extension.
+
+`beamsig` chains to a pinned Teleport user CA, requires
+`bot-name@goteleport.com` to match `beam-<uuid>`, and checks the claimed time
+against the certificate window.
+
+## Biggest caveat
+
+The beam key **never rotates** — only the certificate does, every 20 minutes,
+rewritten in place. Every certificate the beam has ever held binds the same key,
+so a signer can embed an older one and choose the validity window a verifier
+sees. `bin/beamsig sign --cert-from <archived identity>` backdates a signature
+34 minutes with full verification success. The achievable time bound is
+*"somewhere in this beam's lifetime"*, not ±61 minutes. Fixing this needs an
+external timestamp (RFC 3161) or a server-side audit anchor; see REPORT.md §4(c)
+and §6.3.
+
+## Setup
+
+```bash
+sudo apt-get install -y python3-venv      # if needed
+./bin/setup.sh                            # venv, gRPC stubs, Teleport CA export
+./bin/start-agent.sh                      # ssh-agent shim over the hardware key agent
+```
+
+## Use
+
+```bash
+# artifacts
+./bin/beamsig sign file -o file.sig
+./bin/beamsig verify file -s file.sig --ca ca/pinned-user-ca.txt \
+    --beam-id "$BEAM_ID" --claimed-time "$(date -u +%s)"
+
+# attestation bundle over several subjects
+./bin/beamsig attest out1 out2 -o bundle.json
+./bin/beamsig verify-attestation bundle.json --subject-dir . \
+    --ca ca/pinned-user-ca.txt --beam-id "$BEAM_ID"
+
+# git
+git config gpg.format ssh
+git config user.signingkey "$PWD/ca/beam-cert.pub"   # the CERTIFICATE, not a key
+git config gpg.ssh.allowedSignersFile "$PWD/ca/allowed_signers"
+SSH_AUTH_SOCK="$PWD/run/agent.sock" git commit -S -m msg
+./bin/beamsig verify-commit HEAD --ca ca/pinned-user-ca.txt --beam-id "$BEAM_ID"
+
+# inspect any SSHSIG without verifying
+./bin/beamsig inspect -s fixtures/sig-from-cert.sig
+```
+
+Verification is fail-closed; a non-zero exit code is the only trustworthy
+signal. Note that both `git verify-commit` and `ssh-keygen -Y verify` print the
+word `Good` on a line *before* failing, so never grep for it.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `REPORT.md` | the findings write-up — start here |
+| `beamsig/` | the library (see below) |
+| `bin/beamsig` | CLI: `sign`, `verify`, `verify-commit`, `attest`, `verify-attestation`, `inspect` |
+| `bin/beamsig-agent`, `bin/start-agent.sh` | ssh-agent shim over the hardware key agent |
+| `bin/setup.sh` | venv + gRPC stubs + CA export |
+| `bin/split-identity.sh`, `bin/inventory.py` | Exp 1: decode the identity file, SSH extensions, X.509 OIDs |
+| `bin/watch-renewal.py`, `bin/start-watch.sh` | Exp 1: archive and diff every identity version |
+| `bin/dissect-sig.py` | Exp 2: does SSHSIG embed the full certificate? |
+| `bin/make-allowed-signers.sh` | Exp 3: fix the Teleport CA export into valid `allowed_signers` |
+| `bin/exp4-renewal.sh`, `bin/exp4-driver.sh` | Exp 4: commits across renewal and expiry |
+| `bin/negative-tests.sh` | Exp 5: 12 must-fail cases |
+| `bin/cms-sign.py`, `bin/exp6-cms.sh` | Exp 6: CMS SignedData via the agent + `openssl cms -verify` matrix |
+| `bin/beamsig-gpgsm-shim.py` | Exp 6: gpgsm-compatible shim for `gpg.format=x509` |
+| `proto/` | Teleport hardware key agent protobuf (vendored from `gravitational/teleport`) |
+| `logs/` | captured output of every experiment — the evidence behind REPORT.md |
+| `fixtures/` | signatures, CMS blobs, CA exports and an attestation bundle |
+
+Library modules: `identity.py` (parse the tbot identity file), `hwagent.py`
+(hardware key agent client), `wire.py` (SSH wire format), `sshcert.py` (OpenSSH
+certificate parser incl. Teleport extensions), `sshsig.py` (SSHSIG parse/build),
+`sshcrypto.py` (SSH signature verification), `gitobj.py` (commit payload /
+signature split), `verify.py` (the beam-aware verifier), `attest.py`
+(attestation envelope), `sshagentshim.py`, `cmssign.py`, `cli.py`.
+
+## What is deliberately not committed
+
+See `.gitignore`. In short: copies of the live identity file (`archive/`,
+`inventory/`) because they are credential files that trip secret scanners, and
+the throwaway CA/user keys the negative tests generate (`exp5/`) because private
+keys should never be committed even when they are disposable.
+`bin/watch-renewal.py` and `bin/negative-tests.sh` recreate both.
+
+## Status
+
+Hackathon proof of concept. The crypto paths are exercised and the negative
+tests pass, but read REPORT.md §4 before relying on any of it — in particular
+the backdating break, the fact that the certificate Key ID is the *owner* rather
+than the beam, and that every process in the beam can sign as the beam.

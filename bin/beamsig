@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# beamsig CLI entrypoint.
+set -euo pipefail
+LAB="${BEAMSIG_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export BEAMSIG_HOME="$LAB"
+if [ ! -x "$LAB/venv/bin/python" ]; then
+  echo "beamsig: venv missing, run $LAB/bin/setup.sh" >&2
+  exit 1
+fi
+exec "$LAB/venv/bin/python" -c '
+import os, sys
+sys.path.insert(0, os.environ["BEAMSIG_HOME"])
+from beamsig.cli import main
+sys.exit(main())
+' "$@"

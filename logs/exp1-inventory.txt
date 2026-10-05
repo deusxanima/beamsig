@@ -1,0 +1,86 @@
+########################################################################
+# IDENTITY FILE: /var/run/tbot/identity/identity
+########################################################################
+
+== private key block ==
+  TYPE                : PIV hardware key REFERENCE (no key material)
+  serial_number       : 4294967295 (0xffffffff)
+  slot_key            : 0x9A -> enum 1
+  touch_required      : False
+  pin_required        : False
+  pin_cache_ttl       : 0
+  public_key          : secp256r1 (256 bit)
+
+== SSH user certificate ==
+  keytype             : ecdsa-sha2-nistp256-cert-v01@openssh.com
+  serial              : 0
+  type                : 1 (user)
+  key id              : jeff@goteleport.com     <-- OWNER (impersonation)
+  principals          : ['root', 'beams', '-teleport-internal-join']
+  valid after         : 1791210987 2026-10-05T14:36:27+00:00
+  valid before        : 1791214647 2026-10-05T15:37:27+00:00
+  lifetime            : 3660s
+  key fingerprint     : SHA256:4jXdejzBCenjWfYrR8qs6BT/esGtkz3cqVJTUWxDhf8
+  CA fingerprint      : SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU
+  critical options    : {}
+  extensions:
+    bot-instance-id@goteleport.com             = dbe1cf6c-8f89-4ab3-bfee-9e2c7e710f6c
+    bot-name@goteleport.com                    = beam-1786bcd6-04b9-4b9e-ad87-0c13071df7e9
+    delegation-session-id@goteleport.com       = bd204fe3-1653-429c-bc81-b64d5a3d514f
+    disallow-reissue                           = 
+    login-ip                                   = 52.3.207.254
+    permit-agent-forwarding                    = 
+    permit-port-forwarding                     = 
+    permit-pty                                 = 
+    private-key-policy                         = none
+    teleport-roles                             = {"roles":["editor","access","auditor","beam-user"]}
+    teleport-route-to-cluster                  = jeff.beams.sh
+    teleport-traits                            = {"aws_role_arns":null,"azure_identities":null,"db_names":null,"db_roles":null,"db_users":null,"gcp_service_accounts":null,"host_user_gid":[""],"host_user_uid":[""],"kubernetes_groups":null,"kubernetes_users":null,"linux_desktop_logins":null,"logins":["root"],"mcp_tools":["parallel"],"windows_logins":null}
+
+== X.509 leaf ==
+  subject             : 1.3.9999.1.15=none,1.3.9999.1.20=local,1.3.9999.2.30=bd204fe3-1653-429c-bc81-b64d5a3d514f,1.3.9999.2.20=dbe1cf6c-8f89-4ab3-bfee-9e2c7e710f6c,1.3.9999.2.18=beam-1786bcd6-04b9-4b9e-ad87-0c13071df7e9,1.3
+  issuer              : 2.5.4.5=122272357919907635617575441175229030869,CN=jeff.beams.sh,O=jeff.beams.sh
+  serial              : 64829494809520962080014863240578262587
+  not before          : 2026-10-05T14:36:27+00:00
+  not after           : 2026-10-05T15:37:27+00:00
+  sig alg             : ecdsa-with-SHA256
+  fingerprint sha256  : facc015b1962c71adef59f368a5cb6fae7b567b7214f9a9388fb03da1803cce7
+  subject RDNs (incl. Teleport custom OIDs):
+    2.5.4.7            localityName           = root
+    2.5.4.7            localityName           = beams
+    2.5.4.7            localityName           = -teleport-internal-join
+    2.5.4.9            streetAddress          = jeff.beams.sh
+    2.5.4.17           postalCode             = {"aws_role_arns":null,"azure_identities":null,"db_names":null,"db_roles":null,"db_users":null,"gcp_service_accounts":null,"host_user_gid":[""],"host_u...
+    2.5.4.10           organizationName       = access
+    2.5.4.10           organizationName       = editor
+    2.5.4.10           organizationName       = auditor
+    2.5.4.10           organizationName       = beam-user
+    2.5.4.3            commonName             = jeff@goteleport.com
+    1.3.9999.1.7       AppName                = jeff.beams.sh
+    1.3.9999.1.9       Unknown OID            = 52.3.207.254
+    1.3.9999.2.9       ClientIP               = true
+    1.3.9999.2.18      BotName                = beam-1786bcd6-04b9-4b9e-ad87-0c13071df7e9
+    1.3.9999.2.20      BotInstanceID          = dbe1cf6c-8f89-4ab3-bfee-9e2c7e710f6c
+    1.3.9999.2.30      DelegationSessionID    = bd204fe3-1653-429c-bc81-b64d5a3d514f
+    1.3.9999.1.20      Unknown OID            = local
+    1.3.9999.1.15      Unknown OID            = none
+  extensions:
+    2.5.29.15              keyUsage
+    2.5.29.37              extendedKeyUsage
+    2.5.29.19              basicConstraints
+    2.5.29.35              authorityKeyIdentifier
+
+== X.509 CA chain from identity file ==
+  [0] subject=2.5.4.5=162940567589269845164590583852679760964,CN=jeff.beams.sh,O=jeff.beams.sh
+      issuer =2.5.4.5=162940567589269845164590583852679760964,CN=jeff.beams.sh,O=jeff.beams.sh
+      serial =162940567589269845164590583852679760964
+      valid  =2026-09-11 .. 2036-09-08
+      sha256 =fdc6f97d8a70d9bdc31b7c6261d6b6aa7c39dc39e96e7b1b5dd3578986616a95
+      CA     =True
+
+== @cert-authority lines (SSH host CA, known_hosts format) ==
+  @cert-authority jeff.beams.sh,*.jeff.beams.sh ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBIW8j6lZo0T7nTBGMdUxdZ5ShSFrACdRHl5xi7ELaS
+
+== does the leaf public key match the SSH cert public key? ==
+  x509 leaf pub == PIV ref pub : True
+  ssh cert pub   == PIV ref pub : True

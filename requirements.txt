@@ -1,0 +1,5 @@
+grpcio==1.84.0
+grpcio-tools==1.84.0
+protobuf
+cryptography==50.0.2
+asn1crypto==1.5.1

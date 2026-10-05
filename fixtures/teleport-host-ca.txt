@@ -1,0 +1,1 @@
+@cert-authority jeff.beams.sh,*.jeff.beams.sh ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBIW8j6lZo0T7nTBGMdUxdZ5ShSFrACdRHl5xi7ELaSlu7hO9+7XDWc/mmbkEVU1Y9N0sY6wUxUfTGq/wbhen954= type=host

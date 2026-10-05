@@ -1,0 +1,105 @@
+wrote good.sig
+wrote otherns.sig
+### fixture sanity check (must all say 'is certificate : True') ###
+good.sig   is certificate : True
+forged.sig is certificate : True
+human.sig  is certificate : True
+otherbot.sig is certificate : True
+
+###################################################################
+# POSITIVE CONTROL
+###################################################################
+-------------------------------------------------------------------
+TEST   : genuine beam signature, correct payload, time now
+EXPECT : ok   RC: 0
+       | BEAM SIGNATURE ATTESTATION
+       | ================================================================
+       |   result               : VERIFIED
+       |   namespace            : beamsig.artifact.v1
+       |   payload sha256       : acd2cc4419fa8c0aa22b6edd46609e8147b426de5a4d2ea66b0ec481c98c7f01
+       | 
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : genuine beam signature, --beam-id matches
+EXPECT : ok   RC: 0
+       | BEAM SIGNATURE ATTESTATION
+       | ================================================================
+       |   result               : VERIFIED
+       |   namespace            : beamsig.artifact.v1
+       |   payload sha256       : acd2cc4419fa8c0aa22b6edd46609e8147b426de5a4d2ea66b0ec481c98c7f01
+       | 
+RESULT : PASS
+
+###################################################################
+# NEGATIVE TESTS
+###################################################################
+-------------------------------------------------------------------
+TEST   : TAMPERED PAYLOAD
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: signature does not match the payload (payload tampered, or signature does not belong to this payload)
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : WRONG CA (host CA pinned instead of user CA)
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: certificate is not signed by any trusted Teleport user CA (cert says CA=SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU, trusted=['SHA256:IdY3Z2tqCi9jCD4VSo0TLhU7Ghb0Rnxs0T/BxcmEYDQ'])
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : ROGUE CA + FORGED bot-name, checked against the REAL Teleport CA
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: certificate is not signed by any trusted Teleport user CA (cert says CA=SHA256:TUyoqZ74Svw7FwAOA2LGaa97BAgXoVKC8IwDCI50UFA, trusted=['SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU'])
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : CERT WITHOUT bot-name (ordinary user cert), its own CA trusted
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: certificate has no bot-name@goteleport.com extension: this is an ordinary Teleport user certificate, not a beam identity
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : BOT THAT IS NOT A BEAM (bot-name=ci-runner), its own CA trusted
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: bot-name 'ci-runner' is not of the form beam-<uuid>; this is a Machine ID bot but not a beam
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : TIMESTAMP AFTER the cert window (+1 year)
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: claimed time 1822748569 (2027-10-05T15:02:49+00:00) is outside the certificate validity window 2026-10-05T14:56:27+00:00 .. 2026-10-05T15:57:27+00:00; the timestamp is self-reported and does not match when the signing certificate was valid
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : TIMESTAMP BEFORE the cert window (-1 year)
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: claimed time 1759676569 (2025-10-05T15:02:49+00:00) is outside the certificate validity window 2026-10-05T14:56:27+00:00 .. 2026-10-05T15:57:27+00:00; the timestamp is self-reported and does not match when the signing certificate was valid
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : TIMESTAMP 2h after signing (cert lifetime is only 61m)
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: claimed time 1791219769 (2026-10-05T17:02:49+00:00) is outside the certificate validity window 2026-10-05T14:56:27+00:00 .. 2026-10-05T15:57:27+00:00; the timestamp is self-reported and does not match when the signing certificate was valid
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : NAMESPACE CONFUSION (signature made for another namespace)
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: namespace mismatch: signature is for 'some.other.namespace', expected 'beamsig.artifact.v1'
+RESULT : PASS
+-------------------------------------------------------------------
+TEST   : WRONG --beam-id demanded
+EXPECT : reject   RC: 2
+       | BEAMSIG VERIFY FAILED: beam id mismatch: signature is from beam 1786bcd6-04b9-4b9e-ad87-0c13071df7e9, expected 00000000-0000-0000-0000-000000000000
+RESULT : PASS
+
+###################################################################
+# CONTRAST: plain ssh-keygen -Y verify on the FORGED cert
+# (rogue CA trusted, as it would be if an attacker controlled the pin,
+#  or if a verifier trusted any CA in a bundle)
+###################################################################
+Good "beamsig.artifact.v1" signature for root with ECDSA-CERT key SHA256:6RhhxbPvDNBtbi4POK4yUXSrJeNwjl+D2CUSVpjCshU
+rc=0
+
+The forged cert carries bot-name@goteleport.com=beam-1786bcd6-...  
+ssh-keygen reports only the principal 'root'. It never reads, checks or
+prints the bot-name extension, so it cannot distinguish a beam from any
+other certificate holder. That is why beamsig exists.
+
+--- and what ssh-keygen -Y find-principals reports for the forged cert ---
+root
+beams
+
+===================================================================
+PASS=12  UNEXPECTED=0
