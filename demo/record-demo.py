@@ -256,7 +256,67 @@ def build_commit(ascii_only=False):
     return c
 
 
-BUILDERS = {"install": build_install, "commit": build_commit}
+# --- loop 1b: install, abridged ------------------------------------------
+
+def build_install_short(ascii_only=False):
+    """A shorter, more legible install loop.
+
+    Deliberately less faithful than build_install(). The beam-side setup output
+    is collapsed into one summary line and the beam UUID is elided, which buys
+    a 80x20 terminal instead of 104x28 -- so the same pixel width carries much
+    larger text -- and about half the duration. Fidelity traded, in order:
+
+      * the four `== ... ==` setup stages become one line;
+      * the pinned CA path and fingerprint are dropped (they are in the full
+        version, and a fingerprint is unreadable at a glance anyway);
+      * `beam-8bba9461-...` is elided after the first component;
+      * `git config commit.gpgsign` and `beamsig trust --list` are cut, leaving
+        one proof that the install took effect;
+      * `$HOME` is shown as `~` in the resulting path.
+
+    Nothing misleading is added: every line still appears in a real run.
+    """
+    chevron = "$" if ascii_only else "\u276f"
+    laptop = (f"{BOLD}{CYAN}jeff{R}{GREY}@{R}{BOLD}{BLUE}laptop{R}"
+              f"{GREY}:{R}{MAGENTA}~/beamsig{R} {GREEN}{chevron}{R} ")
+    beam = (f"{BOLD}{YELLOW}beams{R}{GREY}@{R}{BOLD}{ORANGE}vapor-jet{R}"
+            f"{GREY}:{R}{MAGENTA}~{R} {GREEN}{chevron}{R} ")
+    c = Cast("beamsig: install onto a Beam (short)", width=80, height=16)
+
+    c.wait(0.7).prompt(laptop).type("./main.sh vapor-jet")
+    c.wait(0.3)
+    c.lines(f"""
+{GREY}Setting up Beam: vapor-jet{R}
+{GREY}SSH is ready. Packed 84 KB.{R}
+{GREY}Running beamsig setup on the Beam...{R}
+""", pause=0.4)
+    c.wait(0.3).line()
+    c.line(f"  {GREY}dependencies, Teleport CA pinned, ~/.gitconfig written{R}")
+    c.wait(0.7).line()
+    c.line("Verifying end to end...").wait(0.9)
+    c.line(f"{GREEN}Signed and verified as beam-8bba9461-\u2026{R}")
+    c.wait(0.4).line()
+    c.line(f"{BOLD}{GREEN}beamsig is ready.{R}")
+    c.wait(1.2)
+
+    c.prompt(laptop).type("tsh beams ssh vapor-jet")
+    c.wait(0.9)
+    c.line(f"{GREY}Connected to vapor-jet.{R}")
+    c.wait(0.5)
+    c.prompt(beam).type("git config --global gpg.ssh.program")
+    c.wait(0.4)
+    c.line(f"{BOLD}{GREEN}~/.beamsig/bin/git-beamsig-keygen{R}")
+    c.wait(0.6)
+    c.prompt(beam)
+    c.wait(2.2)
+    return c
+
+
+BUILDERS = {
+    "install": build_install,
+    "install-short": build_install_short,
+    "commit": build_commit,
+}
 
 
 def main():
