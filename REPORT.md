@@ -688,6 +688,15 @@ $ # rewritten payload      -> signature does not match the payload (rc=2)
 
 19. **`pkill -f <pattern>` matched my own shell** (the pattern appears in the shell's own argv), killing the session mid-command. Not a Beams bug; noting it because it silently destroyed one experiment's state.
 
+20. **The beam image ships stale apt lists, so the remedy in papercut 18 fails on a fresh beam.** Following the `ensurepip` hint verbatim is a dead end until the index is refreshed, and the error names a package that cannot be installed rather than one that can:
+    ```
+    $ sudo apt-get install -y python3-venv
+    Package python3-venv is not available, but is referred to by another package.
+    E: Package 'python3-venv' has no installation candidate
+    $ sudo apt-get update && sudo apt-get install -y python3.11-venv   # works
+    ```
+    Two separate costs: the image's package index is not primed, and `python3-venv` (the virtual package `bin/setup.sh` recommends) has no candidate on this image even after `update` — only the versioned `python3.11-venv` does. A beam image intended for Python workloads should either pre-install `python3.11-venv` or prime the apt index. (Debian 12 bookworm, Python 3.11.2, beam image as of 2026-10-05.)
+
 ---
 
 ## 8. Artifacts
