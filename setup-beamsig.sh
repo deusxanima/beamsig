@@ -72,10 +72,26 @@ printf 'Configuring beamsig for beam %s (%s) on %s\n\n' \
 # beamsig needs grpcio (to speak to Teleport's hardware key agent), cryptography
 # and asn1crypto, none of which ship with the Beam image, so it runs out of a
 # virtualenv. Debian splits the venv module into its own package.
+install_venv_pkg() {
+    local versioned
+    versioned="python3.$(python3 -c 'import sys; print(sys.version_info.minor)')-venv"
+    sudo apt-get install -y -q python3-venv >/dev/null 2>&1 ||
+        sudo apt-get install -y -q "$versioned" >/dev/null 2>&1
+}
+
 if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
     echo "Installing python3-venv..."
-    sudo apt-get install -y -q python3-venv >/dev/null 2>&1 ||
-        sudo apt-get install -y -q "python3.$(python3 -c 'import sys; print(sys.version_info.minor)')-venv" >/dev/null
+    # A fresh Beam image can ship with no apt package lists at all, in which
+    # case the install fails with "has no installation candidate". Only pay for
+    # `apt-get update` when that happens.
+    if ! install_venv_pkg; then
+        echo "Refreshing package lists..."
+        sudo apt-get update -q >/dev/null
+        install_venv_pkg || {
+            echo "error: could not install the python3 venv package" >&2
+            exit 1
+        }
+    fi
 fi
 python3 -c 'import ensurepip' >/dev/null 2>&1 || {
     echo "error: python3 venv module still unavailable" >&2
