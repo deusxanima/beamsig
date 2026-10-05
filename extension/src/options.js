@@ -8,7 +8,7 @@
     annotateLists: true,
     listBudget: 10,
     extraCAs: [],
-    discoverAllow: [],
+    discoverAllow: globalThis.Beamsig.discover.DEFAULT_ALLOW,
   };
 
   function status(msg) {

@@ -1,4 +1,4 @@
-// Opt-in, lazy pinning of a Teleport user CA for an unseen tenant. JS twin of
+// Lazy pinning of a Teleport user CA for an unseen tenant (hands-free for *.beams.sh). JS twin of
 // beamsig/discover.py; read the docstring there first, it is the argument for
 // everything below.
 //
@@ -12,8 +12,9 @@
 //
 // So, as in Python, discovery is:
 //
-//   * OFF unless the user lists patterns in the options page;
-//   * restricted to that hostname allowlist (globs, e.g. `*.beams.sh`);
+//   * ON for `*.beams.sh` by default so it is hands-free for Beams users, and
+//     switched off by emptying the allowlist in the options page;
+//   * restricted to that hostname allowlist (globs), never "any host";
 //   * trust-on-first-use: the fetched CA is stored and pinned from then on, so a
 //     later change of CA is refused loudly rather than followed silently;
 //   * always reported as DISCOVERED, never as operator-pinned.
@@ -25,6 +26,8 @@
 
   const ns = (root.Beamsig = root.Beamsig || {});
 
+  // Every Beams tenant. Anything else must be added by the user.
+  const DEFAULT_ALLOW = ["*.beams.sh"];
   const PIN_PREFIX = "pin:";
   const MAX_EXPORT_BYTES = 20000;
   const MAX_CA_LINES = 10;
@@ -77,6 +80,7 @@
   }
 
   ns.discover = {
+    DEFAULT_ALLOW,
     PIN_PREFIX,
     MAX_EXPORT_BYTES,
     allowed,

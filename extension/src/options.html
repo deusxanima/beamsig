@@ -101,16 +101,16 @@
     </p>
     <div class="pin" id="shipped-ca">loading…</div>
 
-    <label for="discoverAllow">Discover CAs for unseen clusters (off unless you list something)</label>
+    <label for="discoverAllow">Discover CAs for unseen clusters</label>
     <div class="hint">
-      A signature's certificate names the cluster it claims to come from. That
-      name is only a claim by whoever signed it, so fetching a CA for it is
-      circular: it shows the signer controls a Teleport cluster at that hostname,
-      not that you should trust it. Leave this empty to keep discovery off. If a
-      team's tenants are all its own, list patterns, one per line, such as
-      <code>*.beams.sh</code>. The first CA fetched for a cluster is pinned and
-      never overwritten, and panels say it was discovered. See
-      <code>beamsig/discover.py</code> for the full argument.
+      On by default for every Beams tenant (<code>*.beams.sh</code>), so commits
+      from a tenant you have not seen verify with no setup. A signature's
+      certificate names the cluster it claims to come from; that name is only a
+      claim by whoever signed it, so a fetched CA shows the signer controls a
+      Teleport cluster at that hostname, not that you should trust it. Panels say
+      the CA was <em>discovered</em>. The first CA fetched for a cluster is pinned
+      and never overwritten. One glob pattern per line; empty turns discovery off.
+      See <code>beamsig/discover.py</code> for the full argument.
     </div>
     <textarea id="discoverAllow" spellcheck="false" style="min-height: 48px"
       placeholder="*.beams.sh"></textarea>

@@ -1,5 +1,5 @@
 // Background worker: fetches a Teleport cluster's user CA on behalf of the
-// content script, for opt-in discovery (see lib/discover.js).
+// content script, for CA discovery (see lib/discover.js).
 //
 // It has to live here. A content script's fetch() is subject to the CORS rules
 // of the github.com page it runs in, and `/webapi/auth/export` sends no CORS
@@ -18,7 +18,7 @@ if (typeof importScripts === "function") importScripts("lib/discover.js");
   const TIMEOUT_MS = 10000;
 
   async function fetchCA(cluster) {
-    const got = await chrome.storage.local.get({ discoverAllow: [] });
+    const got = await chrome.storage.local.get({ discoverAllow: discover.DEFAULT_ALLOW });
     if (!discover.allowed(cluster, got.discoverAllow)) {
       throw new Error(`${cluster} is not covered by the discovery allowlist`);
     }

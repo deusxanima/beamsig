@@ -55,7 +55,7 @@
 
   // ---- discovery ------------------------------------------------------------
 
-  // Opt-in and fenced: see lib/discover.js, and beamsig/discover.py which it
+  // Fenced (allowlist, TOFU pin): see lib/discover.js, and beamsig/discover.py which it
   // mirrors. Only reached when no known CA matched AND the certificate names a
   // cluster on the user's allowlist.
   class DiscoveryRefused extends Error {}
@@ -80,8 +80,8 @@
     const patterns = settings.discoverAllow || [];
     if (!patterns.length) {
       throw new DiscoveryRefused(
-        "discovery is off; add a pattern such as *.beams.sh to the discovery " +
-          "allowlist in the extension options to permit it"
+        "discovery is turned off (the discovery allowlist in the extension " +
+          "options is empty)"
       );
     }
     if (!ns.discover.allowed(cluster, patterns)) {

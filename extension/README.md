@@ -130,9 +130,9 @@ certificate, chained to the pinned CA), **self-reported**, and **not checked**
 Pinned by value in `src/lib/ca.js`, exported from
 `GET https://<cluster>/webapi/auth/export?type=user`. The pin is always tried
 first and is the strongest anchor. It is never fetched at render time *in place
-of* the pin; opt-in discovery below applies only when no known CA matches.
+of* the pin; discovery below applies only when no known CA matches.
 
-**Discovery of other tenants is opt-in.** A repo can hold beam commits from any
+**Other Beams tenants are discovered automatically.** A repo can hold beam commits from any
 tenant, so a CA shipped at install time is not enough. This works the way
 `beamsig/discover.py` does; read its docstring first, because the argument is
 the same. The cluster name in a certificate (`teleport-route-to-cluster`) comes
@@ -142,11 +142,12 @@ cause us to fetch that CA, which validates their certificate. It shows the
 signer controls a Teleport cluster at that hostname. It does not show the signer
 is trusted.
 
-So discovery is fenced the same way:
+So discovery is fenced the same way, even though it is on for Beams:
 
-- **Off unless asked.** The options page has a *discovery allowlist* (globs, e.g.
-  `*.beams.sh`, the analogue of `--discover-allow`). Empty means off, and it is
-  empty by default.
+- **Hands-free for Beams, off for everything else.** The options page has a
+  *discovery allowlist* (globs, the analogue of `--discover-allow`). It defaults to
+  `*.beams.sh`, so any Beams tenant just works with no setup. Empty it to turn
+  discovery off; add patterns to cover other domains.
 - **Allowlisted hostnames only.** Only a cluster matching a pattern is ever
   contacted, over HTTPS by a background worker (the endpoint sends no CORS
   headers, so a page script cannot), with no cookies and no redirects. Hosts
@@ -283,7 +284,7 @@ node extension/test/make-preview-data.mjs
 | `src/lib/sshsig.js` | SSHSIG envelope parse + signed-data construction |
 | `src/lib/sshcrypto.js` | WebCrypto verification; mpint→`r‖s` and RSA→SPKI DER |
 | `src/lib/ca.js` | the pinned Teleport user CA, by value |
-| `src/lib/discover.js` | opt-in discovery: allowlist match and CA-export parsing (twin of `beamsig/discover.py`) |
+| `src/lib/discover.js` | discovery: allowlist match and CA-export parsing (twin of `beamsig/discover.py`) |
 | `src/background.js` | background worker that fetches a cluster's CA for discovery (content scripts cannot: CORS) |
 | `src/lib/verify.js` | the beam-aware policy — port of `beamsig/verify.py` |
 | `src/lib/avatar.js` | deterministic robot avatar seeded by beam UUID — JS port of `tools/avatar/teleport_avatar.py` |

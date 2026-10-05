@@ -139,14 +139,16 @@ p.d.body.insertAdjacentHTML("beforeend", "<p>x</p>");
 await sleep(700);
 ok("navigating away removes panel", !p.d.getElementById("beamsig-panel"));
 
-console.log("\ndiscovery (opt-in, allowlisted, pinned on first use)");
-const ALLOW = { discoverAllow: ["*.beams.sh"] };
+console.log("\ndiscovery (on for *.beams.sh by default, allowlisted, pinned on first use)");
+const ALLOW = {}; // defaults: *.beams.sh
 const GOODURL = `https://github.com/o/r/commit/${SHAS.good}`;
 const serve = (c) => (c === "jeff.beams.sh" ? REAL_CA : null);
 
 p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve });
-ok("OFF by default: nothing is fetched", p.asked.length === 0);
-ok("...and the panel says discovery is off", T(p).includes("Not a beam signature") && T(p).includes("discovery is off"), T(p));
+ok("ON by default for *.beams.sh, no setup", p.asked.join() === "jeff.beams.sh" && T(p).includes("Signed by beam"), `${p.asked} ${T(p).slice(0, 80)}`);
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { discoverAllow: [] } });
+ok("an empty allowlist turns it off: nothing is fetched", p.asked.length === 0);
+ok("...and the panel says discovery is turned off", T(p).includes("Not a beam signature") && T(p).includes("turned off"), T(p));
 
 p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { ...ALLOW } });
 ok("asked the cluster named in the cert", p.asked.join() === "jeff.beams.sh", p.asked.join());
@@ -154,8 +156,8 @@ ok("verifies against the discovered CA", T(p).includes("Signed by beam"), T(p).s
 ok("reports it as DISCOVERED, not operator-pinned", T(p).includes("discovered from jeff.beams.sh") && T(p).includes("NOT operator-pinned"));
 ok("pinned on first use (persisted)", Object.keys(p.store).includes("pin:jeff.beams.sh"));
 const pinned = { ...p.store };
-p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => null, store: pinned });
-ok("next view uses the stored pin, with discovery even off", p.asked.length === 0 && T(p).includes("Signed by beam") && T(p).includes("discovered from"), T(p).slice(0, 100));
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => null, store: { ...pinned, discoverAllow: [] } });
+ok("next view uses the stored pin, with discovery turned off", p.asked.length === 0 && T(p).includes("Signed by beam") && T(p).includes("discovered from"), T(p).slice(0, 100));
 
 p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => REAL_CA, store: { ...ALLOW, "pin:jeff.beams.sh": { text: OTHER_CA.replace("other", "jeff"), fetchedAt: 1 } } });
 ok("an existing pin that does not verify is NEVER overwritten", p.asked.length === 0 && p.store["pin:jeff.beams.sh"].fetchedAt === 1, `${p.asked}`);

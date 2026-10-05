@@ -78,7 +78,7 @@
         blob: cert,
         fingerprint: fp,
         userAdded: !!entry.userAdded,
-        // True for a CA found by opt-in discovery (see discover.js), not chosen
+        // True for a CA found by discovery (see discover.js), not chosen
         // by the user. Mirrors TrustAnchor.discovered in verify.py.
         discovered: !!entry.discovered,
       });
