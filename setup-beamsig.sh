@@ -1,33 +1,57 @@
 #!/usr/bin/env bash
-# Install and configure beamsig for a fresh Beam.
+# Install and configure beamsig on a Beam.
 #
-# Makes every git repository in this Beam sign its commits with the Beam's own
+# Makes every git repository on this Beam sign its commits with the Beam's own
 # Teleport identity, and makes `git log` report which Beam signed. Verification
 # chains to the cluster's SSH user CA, so a signature stays checkable offline
 # after the Beam and its certificates are gone.
 #
-# This script is self-contained: copy just this file onto a Beam and run it. It
-# clones the beamsig repository itself.
+# This runs ON the Beam and assumes beamsig has been copied here already: it
+# never clones, fetches or reaches any git remote, because a Beam is not
+# guaranteed to have credentials for one. Use ./main.sh <beam> from a machine
+# that has the checkout; it copies this script plus a tarball of the tree.
+#
+# Source is taken from, in order:
+#   1. the directory containing this script, if it looks like a beamsig tree
+#   2. beamsig.tar.gz (or $BEAMSIG_TARBALL) sitting next to this script
 #
 # Usage:
-#   ./setup-beamsig.sh                 clone (or update) and configure
-#   ./setup-beamsig.sh --no-autosign   configure, but don't sign by default
-#   ./setup-beamsig.sh --no-showsig    configure, but don't show sigs in git log
+#   setup-beamsig.sh                 install
+#   setup-beamsig.sh --no-autosign   install, but don't sign by default
+#   setup-beamsig.sh --no-showsig    install, but don't show sigs in git log
+#   setup-beamsig.sh --uninstall     remove everything this installed
 #
 # Environment:
-#   BEAMSIG_REPO  git URL to clone      (default beams@boros:beamsign.git)
-#   BEAMSIG_DIR   checkout location     (default $HOME/beamsig)
-#   BEAMSIG_REF   branch/ref to check out (default: the remote's default)
+#   BEAMSIG_DIR      install location  (default $HOME/.beamsig)
+#   BEAMSIG_TARBALL  explicit tarball path
+#
+# Everything it writes lives in $BEAMSIG_DIR, ~/.config/beamsig and the beamsig
+# keys in ~/.gitconfig. Nothing persists beyond the Beam.
 set -euo pipefail
 
-REPO="${BEAMSIG_REPO:-beams@boros:beamsign.git}"
-DIR="${BEAMSIG_DIR:-$HOME/beamsig}"
-REF="${BEAMSIG_REF:-}"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DIR="${BEAMSIG_DIR:-$HOME/.beamsig}"
+CFG="${BEAMSIG_CONFIG_DIR:-$HOME/.config/beamsig}"
 INSTALL_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
         --no-autosign | --no-showsig) INSTALL_ARGS+=("$arg") ;;
+        --uninstall)
+            if [[ -x "$DIR/bin/install-global.sh" ]]; then
+                "$DIR/bin/install-global.sh" --uninstall
+            else
+                echo "note: $DIR/bin/install-global.sh missing; clearing git keys directly"
+                for k in user.name user.email gpg.format gpg.ssh.program \
+                    gpg.ssh.allowedSignersFile user.signingkey \
+                    commit.gpgsign tag.gpgsign log.showSignature; do
+                    git config --global --unset-all "$k" 2>/dev/null || true
+                done
+            fi
+            rm -rf "$DIR" "$CFG"
+            printf 'Removed %s and %s\n' "$DIR" "$CFG"
+            exit 0
+            ;;
         *)
             echo "error: unknown option: $arg" >&2
             exit 2
@@ -40,7 +64,9 @@ done
 : "${BEAM_ALIAS:?BEAM_ALIAS is not set; run this on a Beam}"
 : "${TELEPORT_CLUSTER:?TELEPORT_CLUSTER is not set; run this on a Beam}"
 
-for cmd in git tsh curl python3 ssh-keygen openssl; do
+# No git remote access is needed, and no tsh. curl reaches the cluster's public
+# CA export endpoint, which any Beam can do.
+for cmd in git curl tar python3 ssh-keygen openssl; do
     command -v "$cmd" >/dev/null || {
         echo "error: $cmd is required" >&2
         exit 1
@@ -99,42 +125,67 @@ python3 -c 'import ensurepip' >/dev/null 2>&1 || {
 }
 
 # --- source ---------------------------------------------------------------
-# Pushing and cloning go through Teleport, so git must use `tsh ssh` as its
-# transport. Persist it in the clone rather than relying on the caller's
-# environment, otherwise a later `git push` from a plain shell fails to
-# resolve the host.
-if [[ -d "$DIR/.git" ]]; then
-    printf 'Updating existing checkout at %s\n' "$DIR"
-    git -C "$DIR" config core.sshCommand "tsh ssh"
-    git -C "$DIR" remote set-url origin "$REPO"
-    git -C "$DIR" fetch --quiet origin
-    if [[ -n "$REF" ]]; then
-        git -C "$DIR" checkout --quiet "$REF"
+STAGED_TARBALL=""
+
+if [[ -f "$HERE/bin/setup.sh" && -f "$HERE/beamsig/cli.py" ]]; then
+    # Already unpacked, and this script lives inside the tree.
+    if [[ "$HERE" != "$DIR" ]]; then
+        printf 'Installing from %s into %s\n' "$HERE" "$DIR"
+        mkdir -p "$DIR"
+        tar -C "$HERE" -cf - \
+            --exclude=./venv --exclude=./.git --exclude=./run \
+            --exclude='*.pyc' --exclude=__pycache__ . | tar -C "$DIR" -xf -
+    else
+        printf 'Using beamsig tree in place at %s\n' "$DIR"
     fi
-    # Only fast-forward; never discard local work during setup.
-    git -C "$DIR" merge --ff-only --quiet '@{u}' 2>/dev/null ||
-        echo "note: left local commits in place (no fast-forward)"
 else
-    printf 'Cloning %s into %s\n' "$REPO" "$DIR"
-    GIT_SSH_COMMAND="tsh ssh" git clone --quiet "$REPO" "$DIR"
-    git -C "$DIR" config core.sshCommand "tsh ssh"
-    if [[ -n "$REF" ]]; then
-        git -C "$DIR" checkout --quiet "$REF"
+    TARBALL="${BEAMSIG_TARBALL:-$HERE/beamsig.tar.gz}"
+    test -f "$TARBALL" || {
+        echo "error: no beamsig source found." >&2
+        echo "       Looked for a tree at $HERE and a tarball at $TARBALL." >&2
+        echo "       Run ./main.sh <beam> from a machine holding the checkout;" >&2
+        echo "       it copies this script and a tarball of the tree across." >&2
+        exit 1
+    }
+    printf 'Unpacking %s into %s\n' "$TARBALL" "$DIR"
+    # Replace any previous install rather than merging into it, so a stale file
+    # from an older copy cannot survive and be picked up.
+    rm -rf "$DIR"
+    mkdir -p "$DIR"
+    tar -xzf "$TARBALL" -C "$DIR"
+    # A tarball made with `tar czf ... .` unpacks flat; one made from a parent
+    # directory nests. Flatten that case so paths below are predictable.
+    if [[ ! -f "$DIR/bin/setup.sh" ]]; then
+        inner="$(find "$DIR" -mindepth 2 -maxdepth 2 -type f -path '*/bin/setup.sh' \
+            -printf '%h\n' | head -1)"
+        inner="${inner%/bin}"
+        if [[ -n "$inner" && -d "$inner" ]]; then
+            shopt -s dotglob
+            mv "$inner"/* "$DIR"/
+            shopt -u dotglob
+            rmdir "$inner" 2>/dev/null || true
+        fi
     fi
+    STAGED_TARBALL="$TARBALL"
 fi
-printf 'At %s\n\n' "$(git -C "$DIR" log --no-show-signature --oneline -1)"
+
+test -f "$DIR/bin/setup.sh" || {
+    echo "error: $DIR does not look like a beamsig tree (no bin/setup.sh)" >&2
+    exit 1
+}
+chmod +x "$DIR"/bin/* "$DIR"/setup-beamsig.sh 2>/dev/null || true
+echo
 
 # --- build + configure ----------------------------------------------------
 # setup.sh builds the venv, generates the hardware key agent gRPC stubs and
 # exports the cluster CAs. install-global.sh writes ~/.gitconfig.
-"$DIR/bin/setup.sh"
+BEAMSIG_HOME="$DIR" "$DIR/bin/setup.sh"
 echo
-"$DIR/bin/install-global.sh" ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"}
+BEAMSIG_HOME="$DIR" "$DIR/bin/install-global.sh" ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"}
 
 # --- smoke test -----------------------------------------------------------
 # Prove the whole chain end to end rather than assuming it: sign a real commit
-# in a throwaway repository and verify it against the pinned CA. Done in a temp
-# directory so nothing is left behind.
+# in a throwaway repository and verify it against the pinned CA.
 echo
 echo "Verifying end to end..."
 SMOKE="$(mktemp -d)"
@@ -159,19 +210,23 @@ fi
 # checks git cannot make (pinned CA, bot-name must be a beam, commit time
 # inside the certificate window).
 "$DIR/bin/beamsig" verify-commit HEAD -C "$SMOKE" \
-    --ca "$HOME/.config/beamsig/pinned-user-ca.txt" \
-    --beam-id "$BEAM_ID" >/dev/null
+    --ca "$CFG/pinned-user-ca.txt" --beam-id "$BEAM_ID" >/dev/null
 
 printf 'Signed and verified as beam-%s\n' "$BEAM_ID"
+
+# Transfer artifacts have served their purpose; don't leave them lying around.
+if [[ -n "$STAGED_TARBALL" ]]; then
+    rm -f "$STAGED_TARBALL"
+fi
 
 cat <<EOF
 
 beamsig is ready.
 
-  repository      $DIR
+  installed       $DIR
   signer          beam-$BEAM_ID
   alias           $BEAM_ALIAS (self-reported; it is in no certificate)
-  trust anchor    $HOME/.config/beamsig/pinned-user-ca.txt
+  trust anchor    $CFG/pinned-user-ca.txt
 
   git commit      signed automatically
   git log         shows the beam that signed
@@ -182,5 +237,6 @@ certificate's Key ID is the Beam's *owner*, not the Beam; anything running in
 the Beam can sign as the Beam; and because the key never rotates while the
 certificate does, a signer can choose which validity window a verifier sees.
 
-Undo with: $DIR/bin/install-global.sh --uninstall
+Nothing here outlives the Beam. To remove it now:
+  $DIR/setup-beamsig.sh --uninstall
 EOF

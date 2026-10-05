@@ -57,6 +57,29 @@ and §6.3.
 
 ## Setup
 
+### Onto a Beam, from a machine with this checkout
+
+```bash
+./main.sh <beam>              # alias or UUID; anything `tsh beams exec` accepts
+./main.sh <beam> --uninstall
+```
+
+`main.sh` packs the tree, copies it plus `setup-beamsig.sh` with
+`tsh beams scp`, and runs the setup over `tsh beams exec`. The target Beam needs
+**no git remote credentials and clones nothing** — it only reaches its own
+cluster for the public CA export. The payload is ~82 KB; the virtualenv is built
+on the Beam rather than shipped.
+
+It packs from an allowlist (`git ls-files --cached --others --exclude-standard`),
+so local uncommitted edits travel but anything `.gitignore`d stays behind. That
+is deliberate: `.gitignore` hides the throwaway private keys the negative tests
+mint under `exp5/` and the archived copies of the identity file.
+
+Nothing outlives the Beam. `setup-beamsig.sh --uninstall` removes the install
+directory, `~/.config/beamsig` and the git config keys.
+
+### In place, on the machine you are already on
+
 ```bash
 sudo apt-get install -y python3-venv      # if needed
 ./bin/setup.sh                            # venv, gRPC stubs, Teleport CA export
@@ -138,6 +161,8 @@ word `Good` on a line *before* failing, so never grep for it.
 | Path | What |
 |---|---|
 | `REPORT.md` | the findings write-up — start here |
+| `main.sh` | install onto a Beam over `tsh beams scp` / `exec` (no git access needed there) |
+| `setup-beamsig.sh` | runs on the Beam; unpacks, builds, configures, smoke-tests |
 | `docs/PRESENTATION-NOTES.md` | hand-off note for a UI / presentation layer, incl. the GitHub userscript route |
 | `beamsig/` | the library (see below) |
 | `bin/beamsig` | CLI: `sign`, `verify`, `verify-commit`, `attest`, `verify-attestation`, `inspect` |
