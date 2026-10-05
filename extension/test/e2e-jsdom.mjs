@@ -68,7 +68,7 @@ async function page(url, html, { status, store = {}, slow = [], pinOther = false
   };
   for (const s of scripts) {
     w.eval(readFileSync(join(ext, s), "utf8"));
-    if (pinOther && s.endsWith("ca.js") && !s.endsWith("cafetch.js")) {
+    if (pinOther && s.endsWith("ca.js") && !s.endsWith("discover.js")) {
       w.Beamsig.ca.PINNED_CAS.splice(0, 1, { cluster: "other.beams.sh", line: OTHER_CA });
     }
   }
@@ -139,29 +139,42 @@ p.d.body.insertAdjacentHTML("beforeend", "<p>x</p>");
 await sleep(700);
 ok("navigating away removes panel", !p.d.getElementById("beamsig-panel"));
 
-console.log("\nCA fetched on demand (nothing pinned matches)");
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, { pinOther: true, exportFor: (c) => (c === "jeff.beams.sh" ? REAL_CA : null) });
+console.log("\ndiscovery (opt-in, allowlisted, pinned on first use)");
+const ALLOW = { discoverAllow: ["*.beams.sh"] };
+const GOODURL = `https://github.com/o/r/commit/${SHAS.good}`;
+const serve = (c) => (c === "jeff.beams.sh" ? REAL_CA : null);
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve });
+ok("OFF by default: nothing is fetched", p.asked.length === 0);
+ok("...and the panel says discovery is off", T(p).includes("Not a beam signature") && T(p).includes("discovery is off"), T(p));
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { ...ALLOW } });
 ok("asked the cluster named in the cert", p.asked.join() === "jeff.beams.sh", p.asked.join());
-ok("verifies against the fetched CA", T(p).includes("Signed by beam"), T(p).slice(0, 120));
-ok("says the CA was fetched, not pinned", T(p).includes("fetched from jeff.beams.sh") && T(p).includes("NOT pinned"));
-ok("fetched CA cached for later views", Object.keys(p.store).includes("ca:jeff.beams.sh"));
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, { pinOther: true, exportFor: () => null, store: { ...p.store } });
-ok("second view uses the cached CA, no new fetch", p.asked.length === 0 && T(p).includes("Signed by beam"), `${p.asked}`);
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, { pinOther: true, exportFor: () => null });
-ok("unreachable cluster => info panel, says why", T(p).includes("Not a beam signature") && T(p).includes("could not fetch"), T(p));
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, { pinOther: true, exportFor: () => OTHER_CA.replace("other", "jeff") });
-ok("cluster serves a different CA => FAILED (false claim), not 'someone else's'", T(p).includes("did NOT verify") && T(p).includes("claims cluster"), T(p));
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, { pinOther: true, exportFor: () => REAL_CA, store: { trustedDomains: ["example.com"] } });
-ok("cluster outside trusted domains is never contacted", p.asked.length === 0 && T(p).includes("Not a beam signature"), `${p.asked}`);
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, { pinOther: true, exportFor: () => REAL_CA, store: { trustedDomains: [] } });
-ok("empty trusted list disables fetching", p.asked.length === 0);
-p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER);
-ok("pinned CA is preferred: no fetch when it matches", p.asked.length === 0 && !T(p).includes("NOT pinned"));
+ok("verifies against the discovered CA", T(p).includes("Signed by beam"), T(p).slice(0, 120));
+ok("reports it as DISCOVERED, not operator-pinned", T(p).includes("discovered from jeff.beams.sh") && T(p).includes("NOT operator-pinned"));
+ok("pinned on first use (persisted)", Object.keys(p.store).includes("pin:jeff.beams.sh"));
+const pinned = { ...p.store };
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => null, store: pinned });
+ok("next view uses the stored pin, with discovery even off", p.asked.length === 0 && T(p).includes("Signed by beam") && T(p).includes("discovered from"), T(p).slice(0, 100));
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => REAL_CA, store: { ...ALLOW, "pin:jeff.beams.sh": { text: OTHER_CA.replace("other", "jeff"), fetchedAt: 1 } } });
+ok("an existing pin that does not verify is NEVER overwritten", p.asked.length === 0 && p.store["pin:jeff.beams.sh"].fetchedAt === 1, `${p.asked}`);
+ok("...and the panel points at rotation", T(p).includes("may have been rotated"), T(p));
+
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => null, store: { ...ALLOW } });
+ok("unreachable cluster => info panel, says discovery failed", T(p).includes("Not a beam signature") && T(p).includes("discovery failed"), T(p));
+ok("...and nothing is pinned", !Object.keys(p.store).some((k) => k.startsWith("pin:")));
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: () => OTHER_CA.replace("other", "jeff"), store: { ...ALLOW } });
+ok("cluster serves a different CA => FAILED (false claim)", T(p).includes("did NOT verify") && T(p).includes("claims cluster"), T(p));
+p = await page(GOODURL, HEADER, { pinOther: true, exportFor: serve, store: { discoverAllow: ["*.example.com"] } });
+ok("cluster outside the allowlist is never contacted", p.asked.length === 0 && T(p).includes("not covered by the discovery allowlist"), `${p.asked}`);
+p = await page(GOODURL, HEADER);
+ok("a matching shipped pin is preferred: no discovery", p.asked.length === 0 && !T(p).includes("discovered"));
 
 console.log("\nuser-added CAs from the options page");
 p = await page(`https://github.com/o/r/commit/${SHAS.good}`, HEADER, {
   pinOther: true, exportFor: () => null,
-  store: { trustedDomains: [], extraCAs: [{ cluster: "jeff.beams.sh", line: REAL_CA }] },
+  store: { extraCAs: [{ cluster: "jeff.beams.sh", line: REAL_CA }] },
 });
 ok("extraCAs saved in options are used", T(p).includes("Signed by beam"), T(p).slice(0, 120));
 ok("and flagged as a user-added trust anchor", T(p).includes("added in the extension's options"));

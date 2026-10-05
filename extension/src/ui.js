@@ -146,10 +146,10 @@
       row(
         "issuing CA",
         att.caFp,
-        att.caFetchedFrom
-          ? `fetched from ${att.caFetchedFrom} · NOT pinned`
+        att.caDiscovered
+          ? `discovered from ${att.caCluster} · pinned on first use · NOT operator-pinned`
           : `pinned${att.caCluster ? ` · ${att.caCluster}` : ""}`,
-        att.caFetchedFrom ? "selfreported" : "attested"
+        att.caDiscovered ? "selfreported" : "attested"
       )
     );
     c.appendChild(row("algorithm", att.sigAlgorithm, "", "attested"));

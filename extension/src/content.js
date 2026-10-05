@@ -22,28 +22,45 @@
 
   // ---- trust anchors --------------------------------------------------------
 
+  // Shipped pins, then the user's extra CAs, then CAs discovered earlier and
+  // pinned on first use (see lib/discover.js). Order does not matter for
+  // verification; it is only the set that counts.
   let casPromise = null;
+
+  async function storedDiscoveredPins() {
+    try {
+      const all = await chrome.storage.local.get(null);
+      return Object.entries(all)
+        .filter(([k]) => k.startsWith(ns.discover.PIN_PREFIX))
+        .flatMap(([k, v]) =>
+          ns.discover.parseExport(v.text, k.slice(ns.discover.PIN_PREFIX.length))
+        );
+    } catch (e) {
+      return []; // no storage (e.g. console bundle): nothing was ever pinned
+    }
+  }
 
   function loadCAs(settings) {
     if (!casPromise) {
       const extra = (settings.extraCAs || []).map((e) => ({ ...e, userAdded: true }));
-      casPromise = verify.loadPinnedCAs([...ca.PINNED_CAS, ...extra]).catch((e) => {
-        casPromise = null;
-        throw e;
-      });
+      casPromise = storedDiscoveredPins()
+        .then((pins) => verify.loadPinnedCAs([...ca.PINNED_CAS, ...extra, ...pins]))
+        .catch((e) => {
+          casPromise = null;
+          throw e;
+        });
     }
     return casPromise;
   }
 
-  // ---- CAs fetched on demand ------------------------------------------------
+  // ---- discovery ------------------------------------------------------------
 
-  // Only reached when no pinned CA matched. See lib/cafetch.js for why this is
-  // sound: we ask only clusters under a trusted domain, and verify.js then
-  // requires the cluster inside the signed certificate to be the one we asked.
-  const CA_TTL_MS = 60 * 60 * 1000;
-  const caFetches = new Map(); // cluster -> Promise<entries>
+  // Opt-in and fenced: see lib/discover.js, and beamsig/discover.py which it
+  // mirrors. Only reached when no known CA matched AND the certificate names a
+  // cluster on the user's allowlist.
+  class DiscoveryRefused extends Error {}
 
-  class CAFetchError extends Error {}
+  const discovering = new Map(); // cluster -> Promise<CAs>, so rows share one fetch
 
   function askBackground(cluster) {
     return new Promise((resolve, reject) => {
@@ -59,34 +76,54 @@
     });
   }
 
-  function fetchClusterCAs(cluster) {
-    if (!caFetches.has(cluster)) {
-      const p = (async () => {
-        const key = `ca:${cluster}`;
-        let text = null;
-        try {
-          const got = (await chrome.storage.local.get(key))[key];
-          if (got && Date.now() - got.fetchedAt < CA_TTL_MS) text = got.text;
-        } catch (e) { /* no storage: just fetch */ }
-        if (text === null) {
-          try {
-            text = await askBackground(cluster);
-          } catch (e) {
-            throw new CAFetchError(e.message);
-          }
-          try {
-            await chrome.storage.local.set({ [key]: { text, fetchedAt: Date.now() } });
-          } catch (e) { /* not fatal */ }
-        }
-        const entries = ns.cafetch.parseExport(text, cluster);
-        if (!entries.length) throw new CAFetchError(`no CA found in ${cluster}'s export`);
-        return verify.loadPinnedCAs(entries);
-      })();
-      // Don't cache failures: a transient network error must not stick.
-      p.catch(() => caFetches.delete(cluster));
-      caFetches.set(cluster, p);
+  function discoverCluster(cluster, settings) {
+    const patterns = settings.discoverAllow || [];
+    if (!patterns.length) {
+      throw new DiscoveryRefused(
+        "discovery is off; add a pattern such as *.beams.sh to the discovery " +
+          "allowlist in the extension options to permit it"
+      );
     }
-    return caFetches.get(cluster);
+    if (!ns.discover.allowed(cluster, patterns)) {
+      throw new DiscoveryRefused(
+        `cluster ${cluster} is not covered by the discovery allowlist ` +
+          `[${patterns.join(", ")}]; add its CA in the extension options if you mean to trust it`
+      );
+    }
+    if (!discovering.has(cluster)) {
+      const key = ns.discover.PIN_PREFIX + cluster;
+      const p = (async () => {
+        let existing = null;
+        try {
+          existing = (await chrome.storage.local.get(key))[key];
+        } catch (e) { /* no storage: nothing is pinned */ }
+        if (existing) {
+          // Already pinned and it did not verify this certificate, so the
+          // cluster's CA changed (rotation) or something is wrong. Never
+          // silently overwrite a pin.
+          throw new DiscoveryRefused(
+            `a pin for ${cluster} already exists but did not verify this ` +
+              "certificate. The cluster's user CA may have been rotated; confirm " +
+              "the new fingerprint out of band, then forget the discovered CA in " +
+              "the extension options"
+          );
+        }
+        const text = await askBackground(cluster);
+        const entries = ns.discover.parseExport(text, cluster);
+        if (!entries.length) throw new Error(`no CA found in ${cluster}'s export`);
+        const cas = await verify.loadPinnedCAs(entries);
+        try {
+          await chrome.storage.local.set({ [key]: { text, fetchedAt: Date.now() } });
+        } catch (e) { /* not fatal: it will be rediscovered next time */ }
+        casPromise = null; // so the new pin is part of the known set from now on
+        return cas;
+      })();
+      // Failures are not remembered (a transient network error must not stick);
+      // a success is, so concurrent rows from one tenant share the result.
+      p.catch(() => discovering.delete(cluster));
+      discovering.set(cluster, p);
+    }
+    return discovering.get(cluster);
   }
 
   // ---- verification ---------------------------------------------------------
@@ -132,26 +169,28 @@
     try {
       return { state: "verified", att: await attempt(cas), record };
     } catch (e) {
+      // Only an unknown CA can be helped by discovery, and the cluster named
+      // by the certificate is merely where to ask: the unauthenticated claim.
       const cluster = e.code === "untrusted-ca" ? e.clusterHint : "";
-      const domains = settings.trustedDomains;
-      if (!cluster || !ns.cafetch.isTrustedCluster(cluster, domains)) return classify(e);
+      if (!cluster) return classify(e);
 
-      // No pinned CA matched, but the cert names a cluster we are willing to ask.
-      let fetched;
+      let found;
       try {
-        fetched = await fetchClusterCAs(cluster);
-      } catch (fe) {
-        log("CA fetch failed", cluster, fe.message);
+        found = await discoverCluster(cluster, settings);
+      } catch (de) {
+        log("discovery not done", cluster, de.message);
         const r = classify(e);
-        r.message += ` (could not fetch ${cluster}'s CA: ${fe.message})`;
+        r.message += ` (discovery not attempted: ${de.message})`;
+        if (!(de instanceof DiscoveryRefused)) r.message = r.message.replace("not attempted", "failed");
         return r;
       }
       try {
-        return { state: "verified", att: await attempt(fetched), record };
+        return { state: "verified", att: await attempt(found), record };
       } catch (e2) {
         if (e2.code === "untrusted-ca") {
-          // It claims a trusted cluster but that cluster's CA did not sign it.
-          // That is not "someone else's signature": it is a false claim.
+          // It claims a cluster we were allowed to ask, but that cluster's CA
+          // did not sign it. That is not "someone else's signature": it is a
+          // false claim.
           return {
             state: "failed",
             message: `certificate claims cluster ${cluster} but is not signed by its CA`,

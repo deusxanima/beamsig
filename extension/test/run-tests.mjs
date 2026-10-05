@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
 const lib = join(here, "..", "src", "lib");
 
-for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "cafetch.js", "avatar.js"]) {
+for (const f of ["wire.js", "sshcert.js", "sshsig.js", "sshcrypto.js", "ca.js", "verify.js", "discover.js", "avatar.js"]) {
   // eslint-disable-next-line no-eval
   eval(readFileSync(join(lib, f), "utf8"));
 }
@@ -357,17 +357,18 @@ console.log("\navatar (JS port vs Python golden)");
   );
 }
 
-console.log("\ncafetch: which clusters may we fetch a CA from");
+console.log("\ndiscover: which clusters may be asked for a CA");
 {
-  const { cafetch } = globalThis.Beamsig;
-  const D = ["beams.sh"];
-  const yes = (h, d = D) => ok(`trusted: ${h}`, cafetch.isTrustedCluster(h, d) === true);
-  const no = (h, d = D) => ok(`refused: ${JSON.stringify(h)}`, cafetch.isTrustedCluster(h, d) === false);
+  const { discover } = globalThis.Beamsig;
+  const D = ["*.beams.sh"];
+  const yes = (h, d = D) => ok(`allowed: ${h}`, discover.allowed(h, d) === true);
+  const no = (h, d = D) => ok(`refused: ${JSON.stringify(h)}`, discover.allowed(h, d) === false);
   yes("quiet-hat.beams.sh");
   yes("jeff.beams.sh");
   yes("a.b.beams.sh");
-  yes("quiet-hat.beams.sh", ["*.beams.sh"]);
-  yes("quiet-hat.beams.sh", [".BEAMS.sh "]);
+  yes("quiet-hat.beams.sh", ["quiet-*.beams.sh"]);
+  yes("quiet-hat.beams.sh", ["quiet-hat.beams.sh"]);
+  yes("quiet-hat.beams.sh", ["  *.BEAMS.sh "]);
   no("beams.sh"); // the apex is not a tenant
   no("evilbeams.sh");
   no("beams.sh.evil.com");
@@ -378,47 +379,48 @@ console.log("\ncafetch: which clusters may we fetch a CA from");
   no("https://quiet-hat.beams.sh");
   no("Quiet-Hat.beams.sh"); // must already be lowercase
   no("quiet-hat.beams.sh.");
+  no("a..beams.sh");
   no("-x.beams.sh");
   no("127.0.0.1");
   no("");
   no(undefined);
-  no("quiet-hat.beams.sh", []); // empty list turns the feature off
+  no("quiet-hat.beams.sh", []); // empty allowlist = discovery off
+  no("quiet-hat.beams.sh", [""]);
   no("quiet-hat.beams.sh", ["example.com"]);
+  no("quiet-hat.beams.sh", ["*.corp.example"]);
 
   const line = text("teleport-user-ca.txt").trim();
-  const ents = cafetch.parseExport(line + "\n", "jeff.beams.sh");
-  ok("export line parsed", ents.length === 1 && ents[0].fetchedFrom === "jeff.beams.sh", JSON.stringify(ents));
-  ok(
-    "a line naming another cluster is dropped",
-    cafetch.parseExport(line, "other.beams.sh").length === 0
-  );
-  ok("junk yields no CAs", cafetch.parseExport("<html>nope</html>", "jeff.beams.sh").length === 0);
+  const ents = discover.parseExport(line + "\n", "jeff.beams.sh");
+  ok("export line parsed and marked discovered", ents.length === 1 && ents[0].discovered === true && ents[0].cluster === "jeff.beams.sh", JSON.stringify(ents));
+  ok("a line naming another cluster is dropped", discover.parseExport(line, "other.beams.sh").length === 0);
+  ok("junk yields no CAs", discover.parseExport("<html>nope</html>", "jeff.beams.sh").length === 0);
   ok(
     "export URL is https and on the asked host",
-    cafetch.exportUrl("quiet-hat.beams.sh") === "https://quiet-hat.beams.sh/webapi/auth/export?type=user"
+    discover.exportUrl("quiet-hat.beams.sh") === "https://quiet-hat.beams.sh/webapi/auth/export?type=user"
   );
 }
 
-console.log("\nfetched CA, and which cluster is authoritative");
+console.log("\ndiscovered CA, and which cluster is authoritative");
 {
-  const { cafetch } = globalThis.Beamsig;
-  const ents = cafetch.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh");
+  const { discover } = globalThis.Beamsig;
+  const ents = discover.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh");
   const good = await verify.loadPinnedCAs(ents);
   const att = await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), good, {
     namespace: "git", claimedTime: INSIDE_WINDOW,
   });
-  ok("verifies against a fetched CA", att.ok && att.caFetchedFrom === "jeff.beams.sh");
-  ok("flagged as not pinned in warnings", att.warnings.some((w) => w.includes("not pinned")));
+  ok("verifies against a discovered CA", att.ok && att.caDiscovered === true);
+  ok("flagged as discovered, not chosen", att.warnings.some((w) => w.includes("discovered, not chosen")));
   // Authoritative cluster = the one bound to the verifying CA, not the claim.
   ok("cluster comes from the CA's label", att.cluster === "jeff.beams.sh" && att.clusterPinned && att.clusterClaimed === "jeff.beams.sh");
   const other = await verify.loadPinnedCAs(
-    cafetch.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh").map((e) => ({ ...e, cluster: "other.beams.sh", fetchedFrom: "" }))
+    discover.parseExport(text("teleport-user-ca.txt"), "jeff.beams.sh").map((e) => ({ ...e, cluster: "other.beams.sh", discovered: false }))
   );
   const att2 = await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), other, {
     namespace: "git", claimedTime: INSIDE_WINDOW,
   });
   ok("a disagreeing claim is not authoritative", att2.cluster === "other.beams.sh" && att2.clusterClaimed === "jeff.beams.sh");
   ok("...and is surfaced as a warning, not a failure", att2.ok && att2.warnings.some((w) => w.includes("treating")));
+  ok("an operator-pinned CA is not flagged as discovered", att2.caDiscovered === false);
   // An untrusted-CA failure carries the (unauthenticated) cluster hint.
   try {
     await verify.verifySSHSig(text("sig-from-cert.sig"), bytes("msg.txt"), [{ ...cas[0], blob: new Uint8Array(cas[0].blob).reverse() }], {});

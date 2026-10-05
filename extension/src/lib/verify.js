@@ -78,9 +78,9 @@
         blob: cert,
         fingerprint: fp,
         userAdded: !!entry.userAdded,
-        // Set only for a CA fetched on demand (see cafetch.js): the host it came from.
-        fetchedFrom: entry.fetchedFrom || "",
-        fetchedFrom: entry.fetchedFrom || "",
+        // True for a CA found by opt-in discovery (see discover.js), not chosen
+        // by the user. Mirrors TrustAnchor.discovered in verify.py.
+        discovered: !!entry.discovered,
       });
     }
     if (!out.length) throw new VerifyError("no pinned CAs configured");
@@ -191,12 +191,13 @@
     }
     att.caFp = matched.fingerprint;
     att.caCluster = matched.cluster;
-    att.caFetchedFrom = matched.fetchedFrom || "";
-    if (att.caFetchedFrom) {
+    att.caDiscovered = !!matched.discovered;
+    if (att.caDiscovered) {
       att.warnings.push(
-        `the trust anchor was fetched from ${att.caFetchedFrom} over HTTPS when ` +
-          "this was verified, not pinned: it is only as trustworthy as that " +
-          "host's TLS and the trusted-domain list in the extension options"
+        `the trust anchor for ${matched.cluster} was discovered, not chosen: it ` +
+          "was fetched over HTTPS from a cluster named by a certificate and pinned " +
+          "on first use. It shows the signer controls a Teleport cluster at that " +
+          "hostname, which is not the same statement as an operator-pinned CA"
       );
     }
     att.caUserAdded = !!matched.userAdded;

@@ -101,16 +101,22 @@
     </p>
     <div class="pin" id="shipped-ca">loading…</div>
 
-    <label for="trustedDomains">Fetch CAs on demand from these domains</label>
+    <label for="discoverAllow">Discover CAs for unseen clusters (off unless you list something)</label>
     <div class="hint">
-      One per line. If a signature's certificate names a cluster under one of
-      these (e.g. <code>quiet-hat.beams.sh</code> under <code>beams.sh</code>)
-      and no pinned CA matches, the extension fetches that cluster's user CA over
-      HTTPS. This is weaker than a pin &mdash; it trusts the domain and TLS &mdash;
-      and the panel says so. Leave empty to disable.
+      A signature's certificate names the cluster it claims to come from. That
+      name is only a claim by whoever signed it, so fetching a CA for it is
+      circular: it shows the signer controls a Teleport cluster at that hostname,
+      not that you should trust it. Leave this empty to keep discovery off. If a
+      team's tenants are all its own, list patterns, one per line, such as
+      <code>*.beams.sh</code>. The first CA fetched for a cluster is pinned and
+      never overwritten, and panels say it was discovered. See
+      <code>beamsig/discover.py</code> for the full argument.
     </div>
-    <textarea id="trustedDomains" spellcheck="false" style="min-height: 48px"
-      placeholder="beams.sh"></textarea>
+    <textarea id="discoverAllow" spellcheck="false" style="min-height: 48px"
+      placeholder="*.beams.sh"></textarea>
+    <p class="hint">Discovered so far (compare these with the cluster out of band):</p>
+    <div class="pin" id="discovered-ca">none</div>
+    <button id="forgetDiscovered" type="button">Forget discovered CAs</button>
 
     <label for="extraCAs">Additional CAs (one per line)</label>
     <div class="hint">
@@ -158,7 +164,7 @@
 
     <script src="lib/wire.js"></script>
     <script src="lib/ca.js"></script>
-    <script src="lib/cafetch.js"></script>
+    <script src="lib/discover.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

@@ -64,11 +64,11 @@
       githubToken: "",
       annotateLists: true,
       listBudget: 10,
-      // Clusters under these domains may have their CA fetched on demand.
-      // Empty turns the feature off.
       // User-added trust anchors (options page); loadCAs() in content.js reads them.
       extraCAs: [],
-      trustedDomains: ns.cafetch ? ns.cafetch.DEFAULT_TRUSTED_DOMAINS : [],
+      // Discovery allowlist (globs, e.g. "*.beams.sh"). Empty = discovery off,
+      // as in the Python CLI. See lib/discover.js before changing this.
+      discoverAllow: [],
     };
     try {
       const got = await chrome.storage.local.get(defaults);
