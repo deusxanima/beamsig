@@ -8,6 +8,12 @@ command transcripts below still show those paths verbatim, because that is what
 was actually executed. The code, evidence logs and fixtures now live in this
 repository — see §8. Everything is re-runnable from a clone via `bin/setup.sh`.
 
+Experiments 8–10 and papercuts 20–27 were added after the first draft, and
+§4(a), §4(d)–(d3) and §5 were revised. Two of those revisions correct the draft
+rather than extend it: the trust model was effectively single-tenant, and
+`%GS` turns out to carry no evidential value at all. Both are called out where
+they appear.
+
 ---
 
 ## 1. TL;DR
@@ -17,6 +23,7 @@ repository — see §8. Everything is re-runnable from a clone via `bin/setup.sh
 3. **`ssh-keygen -Y verify` alone cannot prove "a beam signed this"** — it only matches cert principals, which are the generic `root`/`beams`. Beam attribution requires a custom verifier that reads the cert extensions; mine passes 12 negative tests.
 4. **Biggest caveat: the beam key never rotates, only the cert does.** The signer picks which cert to embed, so it chooses the validity window a verifier sees. I backdated a signature 34 minutes with full verification success. The time bound is "somewhere in this beam's lifetime", not ±61 minutes.
 5. **The alias is never bound** to any credential, and the only `BEAM_ID → BEAM_ALIAS` mappings are live cluster queries that disappear with the beam.
+6. **Trust must be keyed by cluster, not a flat CA list**: the certificate's cluster is only a claim by whoever signed it, so trusting two tenants otherwise lets either impersonate the other. Demonstrated, then fixed.
 
 ---
 
@@ -459,6 +466,157 @@ The first row **is** our cert (`identity_expires` 15:57:27 matches the cert wind
 
 ---
 
+### Experiment 8 — Multi-tenant trust
+
+Added after the first draft, when it became clear the trust model only really
+worked for one tenant. No tenant was ever hardcoded — everything derives from
+`$TELEPORT_CLUSTER` — but trust was a flat list of CA blobs with no cluster
+binding, and the cluster name was read from the certificate's
+`teleport-route-to-cluster` extension. **That extension is only a claim made by
+whoever signed the certificate.** So the moment two tenants were trusted, either
+could mint a certificate claiming to be the other.
+
+A second tenant was simulated with a local CA (`bin/multitenant-tests.sh`),
+which is sufficient because the question is purely whether trust is keyed by CA.
+
+```
+$ ./bin/beamsig trust --list --store store
+trust store: store
+  jeff.beams.sh             SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU
+  other-tenant.example.sh   SHA256:TUyoqZ74Svw7FwAOA2LGaa97BAgXoVKC8IwDCI50UFA
+```
+
+| Test | Result |
+|---|---|
+| tenant 1 (real beam) verifies | VERIFIED |
+| tenant 2 (simulated beam) verifies from the **same** store | VERIFIED |
+| tenant 2 signature, `--cluster other-tenant.example.sh` | VERIFIED |
+| tenant 2 signature, `--cluster jeff.beams.sh` demanded | rejected |
+| **tenant 2 mints a cert claiming to be tenant 1**, `--cluster jeff.beams.sh` | rejected |
+
+The spoof case is the one that matters. Without `--cluster` it is attributed to
+the tenant that actually signed it, and the false claim is flagged rather than
+believed:
+
+```
+  teleport cluster     : other-tenant.example.sh
+  cluster claimed      : jeff.beams.sh   (NOT authoritative)
+  ! certificate claims cluster 'jeff.beams.sh' but was signed by the CA pinned
+    for 'other-tenant.example.sh'; treating 'other-tenant.example.sh' as authoritative
+```
+
+**Conclusion:** trust is now a store of cluster-labelled pins
+(`~/.config/beamsig/trusted/<cluster>.ca`) and the authoritative cluster is the
+one bound to the **pin that verified the certificate**, never the one the
+certificate asserts. A disagreement warns rather than fails, because a
+root/leaf trusted-cluster setup legitimately routes to a cluster other than the
+signer. An *unlabelled* pin cannot vouch for a cluster name at all: beamsig
+falls back to the certificate's claim and says so loudly.
+
+Two consequences. A beam's identity is really the pair **(cluster, beam id)** —
+`--beam-id` alone is under-specified across tenants. And `allowed_signers` has
+no syntax for which cluster a `cert-authority` line belongs to, so with several
+tenants listed **stock `ssh-keygen` cannot tell them apart at all**; it is
+strictly less safe than `beamsig verify` here.
+
+---
+
+### Experiment 9 — Commits from an unpinned tenant
+
+What a repository with commits from several tenants actually does. Built a
+genuine foreign-tenant commit (own CA, own beam bot-name,
+`teleport-route-to-cluster=other.example.sh`) and verified it against a store
+that does not contain its CA.
+
+```
+$ git log --show-signature -1        # stock ssh-keygen
+Good "git" signature with ECDSA-CERT key SHA256:qoOp6kLYO6Fq3b3H2pihOAxceLdem6G04adObAuSdmk
+No principal matched.
+$ git log -1 --format='%G?|%GS'
+U|
+```
+
+**`U`, not `B`** — good signature, unknown trust. The semantics were already
+right; the output was useless, and to a reader it looks like tampering.
+
+A surprise that cost some time: **git never calls `-Y verify` here.** When
+`find-principals` finds no match it calls `-Y check-novalidate` instead, so a
+hook placed in the verify path never runs.
+
+```
+argv: -Y find-principals -f .../allowed_signers -s /tmp/.git_vtag_tmpBwvXb4 -Overify-time=20261005204050
+argv: -Y check-novalidate -n git -s /tmp/.git_vtag_tmpBwvXb4 -Overify-time=20261005204050
+```
+
+With the explanation added at `check-novalidate`, and `%G?` still `U`:
+
+```
+Good "git" signature with ECDSA-CERT key SHA256:qoOp6kLYO6Fq3b3H2pihOAxceLdem6G04adObAuSdmk
+UNTRUSTED TENANT: the signature is intact, but its Teleport CA is not pinned here.
+  claims cluster  other.example.sh  (unverified: this comes from the certificate itself)
+  claims beam     5d41402a-bc4b-2a76-b971-9d911017c592  (unverified)
+  issuing CA      SHA256:48TyCfGeffUJFJ8EF60O5RtCnnoFQ8oanLMqS3xy/rU
+  to trust it     beamsig trust other.example.sh
+```
+
+`beamsig verify*` now exits **3** for an untrusted tenant, distinct from **2**
+for an invalid signature. That distinction matters: "we have never heard of
+that tenant" is not "this signature is bad", and CI or a UI must be able to
+tell them apart.
+
+**Lazy CA loading** is possible, because the certificate names its cluster — but
+that name comes from the artifact being verified, so fetching a trust anchor it
+names is circular. Anyone can mint a CA plus a certificate claiming
+`teleport-route-to-cluster=evil.example.com`; discovery would fetch
+evil.example.com's CA and validate against it. The result shows the signer
+controls a Teleport cluster at that hostname. It is **not** a pin an operator
+chose. So discovery (`beamsig/discover.py`) is:
+
+* off unless `--discover-allow <glob>` / `BEAMSIG_DISCOVER_ALLOW` is given;
+* gated on the name matching a glob **and** being a valid hostname
+  (`evil.example.com`, `../../etc/passwd`, `a b` and over-long names all refused);
+* trust-on-first-use, pinned thereafter;
+* never a silent overwrite — a changed CA is reported, not accepted;
+* reported as unauthenticated on first use, with the fingerprint to confirm out
+  of band.
+
+```
+$ beamsig verify-commit HEAD --ca /tmp/emptystore --discover-allow '*.beams.sh'
+NOTE: discovered and pinned jeff.beams.sh (SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU)
+      First use was unauthenticated: the cluster name came from the certificate
+      being verified. Confirm that fingerprint out of band.
+  result               : VERIFIED
+```
+
+**Conclusion:** usable for a team whose tenants are all its own
+(`--discover-allow '*.yourdomain'`). Not something to enable by default.
+
+---
+
+### Experiment 10 — Cross-beam verification, confirmed
+
+The headline claim, actually demonstrated rather than argued. A second beam
+(`vapor-jet`, `8bba9461-…`) was created, provisioned by copying one file, and
+made to sign. This beam (`clever-nebula`) verified it.
+
+```
+$ git log --show-signature -1 origin/vapor-jet-demo
+Good "git" signature for beam-8bba9461-0638-4a00-9752-c9064f9d832f with ECDSA-CERT key SHA256:FVjefo3v…
+  bot instance  c39a4a51-f694-47ef-abc2-bb96340810d7
+  owner         jeff@goteleport.com  (impersonated, NOT the signer)
+  cert window   2026-10-05T17:16:27Z .. 2026-10-05T18:17:27Z
+  teleport CA   SHA256:c/8F7ipW3zBqBRe0Eau/ZBDU8hpFtLzZI9bH32668UU
+```
+
+Different signing key (`FVjefo3v…` vs `4jXdejzB…`), different bot instance,
+different delegation session, **same CA**. No shared secret; the only thing the
+verifier needed was the cluster's public user CA. Demanding the wrong
+`--beam-id` fails with rc=2. The same held for the artifact path: an artifact
+signed on `vapor-jet` verified here after being copied over, and each beam has
+its own key, so the key fingerprint is a per-beam identifier.
+
+---
+
 ## 4. Security analysis
 
 ### What a verified `beamsig` signature **does** prove
@@ -472,7 +630,20 @@ The first row **is** our cert (`identity_expires` 15:57:27 matches the cert wind
 
 ### What it does **not** prove
 
-**(a) Impersonation: Key ID is the owner, not the beam.** The cert's Key ID is `jeff@goteleport.com` and the principals are `root`/`beams`. Any tool that reports "who signed this" from the Key ID or principals — which is every stock tool — will say **the human**. The beam identity is *only* in the extensions. This is also why `%GS` on the ssh path reads `root`. Mitigation: the verifier must read `bot-name` and must *display* the owner as "impersonated, not the signer". Consequence: a beam signature is **not** evidence the human reviewed anything.
+**(a) Impersonation: Key ID is the owner, not the beam — and the reported "signer" is worse than misleading, it is verifier-controlled cosmetics.** The cert's Key ID is `jeff@goteleport.com` and the principals are `root`/`beams`. Any tool that reports "who signed this" from the Key ID or principals — which is every stock tool — will say **the human**. The beam identity is *only* in the extensions.
+
+The first draft called `%GS` merely misleading. It is weaker than that. Git does not know who signed: it runs `ssh-keygen -Y find-principals`, takes the **first line**, and feeds it back as `-I`; `ssh-keygen` then echoes that same string into `Good "git" signature for <X>`. So `%GS` is the first of the certificate's SSH login principals that *the verifier's own* `allowed_signers` happens to accept. Same commit, same signature, same key, only the trust file edited:
+
+| `allowed_signers` principals | `%GS` reports |
+|---|---|
+| `*` | `root` |
+| `beams` | **`beams`** |
+| `beams,root` | **`beams`** |
+| `nonexistent-principal` | *(empty, `%G?`=U, rc=1)* |
+
+And it can never be the thing you want — `-I beam-1786bcd6-…` or `-I jeff@goteleport.com` both give `name is not a listed principal`, because `allowed_signers` matching is defined over certificate *principals* only, and the bot name is an extension. `%GS` therefore has **no evidential value**, not even as a weak signal, and a UI must not surface it. (`bin/git-beamsig-keygen` exploits the same mechanism deliberately to put the beam name there — which is honest only because it also performs the beam checks before printing it.)
+
+Mitigation: the verifier must read `bot-name` and must *display* the owner as "impersonated, not the signer". Consequence: a beam signature is **not** evidence the human reviewed anything.
 
 **(b) Anything in the beam can sign — the key is not readable, but it is freely usable.** This is more nuanced than "can read the key". The key is genuinely non-exportable; I could not extract it and neither can an attacker. But the hardware key agent has:
 
@@ -518,11 +689,17 @@ Signed at 15:11:29, attested as 14:37:27 — **34 minutes earlier, fully VERIFIE
 
 This is **not fixable in the verifier**. It needs an external timestamp (RFC 3161 TSA, a transparency log, or correlation to a server-side audit event). I would not claim a tight "during `<time window>`" without one.
 
-**(d) The alias is not bound.** `BEAM_ALIAS` appears in no certificate, SSH extension, or X.509 OID. My attestation envelope carries it under `selfReported` and renders it `<-- unverifiable`. Resolving `uuid → alias` needs a live cluster query that dies with the beam, so a third party verifying later **cannot** establish the alias at all. Only the UUID is durable. Anyone building on this should treat the alias as a cosmetic label and the UUID as the identity. Aliases also look reusable across beams over time.
+**(d) Cross-tenant impersonation, if trust is not keyed by cluster.** Covered in Experiment 8. The short version: `teleport-route-to-cluster` is a claim scoped to whoever signed the certificate, so a flat list of trusted CAs lets any trusted tenant impersonate any other. The authoritative cluster must come from the pin. This was a real flaw in the first draft's design, not a hypothetical. Related: `allowed_signers` cannot express cluster at all, so stock `ssh-keygen` with several tenants listed cannot distinguish them — any trusted tenant's beam will verify as any other's.
 
-**(e) Renewal / rotation behaviour.** Renewal every 20 min, 61-min lifetime, file rewritten in place (same inode), **key constant**, `bot-instance-id` and `delegation-session-id` stable. Implications: signing tools must re-read the identity file per operation or they break ~20 minutes in (Exp 4) — and this failure is *silent in the sense that it looks like an agent error, not a cert problem*. Durability is fine: expired certs still verify when the verifier supplies the right time. And because the key is stable, the **key fingerprint is itself a beam-lifetime identifier** — a useful cross-check, and also the thing that enables (c).
+**(d2) Lazy CA discovery is circular trust.** Fetching a CA for the cluster named *inside the certificate you are verifying* proves only that the signer controls a Teleport cluster at that hostname. It is not equivalent to an operator-chosen pin, and it is also a request to an attacker-named host. Hence off by default, allowlisted, TOFU-pinned, and reported as unauthenticated. See Experiment 9.
 
-**(f) Smaller points.** `disallow-reissue` is present, so a leaked cert cannot mint more certs — good. There is no revocation story: if a beam is compromised, already-made signatures remain valid forever and nothing in the envelope can be revoked (Teleport CRLs cover TLS, not SSHSIG). `teleport-traits` leaks `mcp_tools`, `logins`, and the owner's login IP into every signature — a mild privacy consideration for public repos. I did not verify whether `Sign` calls are audited server-side; the agent is local to the beam and I saw no evidence they are, so assume **signing is unaudited**.
+**(d3) The signing shim hijacked every signature.** Worth recording because it bit me rather than being theorised: installed globally, `git-beamsig-keygen` ignored `user.signingkey` entirely and signed *everything* as the beam. A developer with their own SSH or GPG signing key would have had it silently replaced. It was found when a test fixture meant to be signed by a second tenant came out signed by this beam, with output confidently naming the wrong beam. Fixed: the shim now only claims a signature when the configured key really is the beam's, and otherwise hands back to the real `ssh-keygen`. The general lesson — a tool that takes over a global code path must be conservative about *when* it takes over.
+
+**(e) The alias is not bound.** `BEAM_ALIAS` appears in no certificate, SSH extension, or X.509 OID. My attestation envelope carries it under `selfReported` and renders it `<-- unverifiable`. Resolving `uuid → alias` needs a live cluster query that dies with the beam, so a third party verifying later **cannot** establish the alias at all. Only the UUID is durable. Anyone building on this should treat the alias as a cosmetic label and the UUID as the identity. Aliases also look reusable across beams over time.
+
+**(f) Renewal / rotation behaviour.** Renewal every 20 min, 61-min lifetime, file rewritten in place (same inode), **key constant**, `bot-instance-id` and `delegation-session-id` stable. Implications: signing tools must re-read the identity file per operation or they break ~20 minutes in (Exp 4) — and this failure is *silent in the sense that it looks like an agent error, not a cert problem*. Durability is fine: expired certs still verify when the verifier supplies the right time. And because the key is stable, the **key fingerprint is itself a beam-lifetime identifier** — a useful cross-check, and also the thing that enables (c).
+
+**(g) Smaller points.** `disallow-reissue` is present, so a leaked cert cannot mint more certs — good. There is no revocation story: if a beam is compromised, already-made signatures remain valid forever and nothing in the envelope can be revoked (Teleport CRLs cover TLS, not SSHSIG). `teleport-traits` leaks `mcp_tools`, `logins`, and the owner's login IP into every signature — a mild privacy consideration for public repos. I did not verify whether `Sign` calls are audited server-side; the agent is local to the beam and I saw no evidence they are, so assume **signing is unaudited**.
 
 ---
 
@@ -544,17 +721,29 @@ Prototype implemented and exercised in this report; `bin/beamsig` with `sign`, `
         signature embeds the FULL Teleport certificate
                        │
  ┌───────────── third party, offline, years later ─────────────┐
- │ trust anchor: webapi/auth/export?type=user  (~200 bytes)    │
- │ beamsig verify → chain to CA, require bot-name=beam-<uuid>, │
+ │ trust store: ~/.config/beamsig/trusted/<cluster>.ca         │
+ │   one ~200-byte pin per tenant, cluster-labelled            │
+ │ beamsig verify → match a pin, take the cluster FROM the pin,│
+ │                  require bot-name=beam-<uuid>,              │
  │                  check claimed time ⊂ cert window           │
  └─────────────────────────────────────────────────────────────┘
 ```
 
-Single trust anchor, pinned by fingerprint. Pin it **by value** and publish it next to the artifacts; `--ca <url>` is a convenience for live use only, and should refuse to run in strict mode.
+A **store of cluster-labelled pins**, not a single anchor: teams do not all share one Beams tenant. Pin **by value** and publish alongside the artifacts; `--ca <url>` is a convenience for live use only and should refuse to run in strict mode. The authoritative cluster is the one bound to the pin that verified the certificate, never the one the certificate claims (Experiment 8). `beamsig trust <cluster>` adds a tenant; `--discover-allow <glob>` permits opt-in TOFU for a domain you own (Experiment 9).
+
+Three outcomes, not two:
+
+| exit | meaning |
+|---|---|
+| 0 | verified |
+| 2 | invalid — bad signature, tampered payload, out-of-window, not a beam |
+| 3 | **untrusted tenant** — intact signature, CA not pinned |
+
+Collapsing 3 into 2 is the mistake to avoid: in a repository spanning tenants it makes "we have not pinned them" indistinguishable from "this is forged".
 
 ### Signing
 
-* **git**: `gpg.format=ssh`, `user.signingkey` = path to the **certificate** (not a key), `SSH_AUTH_SOCK` = the shim. Nothing bespoke; git's native verify-time pinning is the feature we want.
+* **git**: `gpg.format=ssh` plus `gpg.ssh.program` = `bin/git-beamsig-keygen`, installed beam-wide by `bin/install-global.sh`. The shim keeps git's native verify-time pinning, reports the beam rather than `root` in `git log` and `%GS`, performs the pinned-CA and bot-name checks the stock tooling cannot, explains unpinned tenants instead of emitting `No principal matched.`, and reads the current certificate on every signature so the 20-minute rotation is invisible. It must only claim a signature when the configured key really is the beam's — see §4(d3).
 * **artifacts**: SSHSIG in namespace `beamsig.artifact.v1`, or an attestation envelope for multiple subjects. Optional CMS export for CMS-native consumers.
 * **Namespaces are mandatory and distinct** per use (`git`, `beamsig.artifact.v1`, `beamsig.attestation.v1`) so a signature cannot be replayed across contexts — tested.
 
@@ -589,7 +778,7 @@ Statement:
 
 Design rules, each learned from a failure above:
 
-1. **Authoritative facts come only from the embedded certificate.** `beamId`, `cluster`, roles, window are re-derived from the cert; the statement copies are advisory and cross-checked (mismatch is reported).
+1. **Authoritative facts come only from the embedded certificate — and the cluster only from the pin.** `beamId`, roles and window are re-derived from the cert; the statement copies are advisory and cross-checked. `cluster` comes from the matching trust anchor, with `cluster_claimed` and `cluster_pinned` exposed separately so a consumer can tell a pinned tenant from a self-asserted one. Treat a beam's identity as the pair *(cluster, beam id)*.
 2. **Unprovable claims are quarantined** under `selfReported` and rendered `<-- unverifiable`. The alias and wall-clock time live there.
 3. **Canonical JSON is enforced on verify** — a non-canonical payload would allow two readings of the same signed bytes; `open_envelope` rejects it.
 4. **Exactly one signature**, to avoid "which signature did you actually check" confusion.
@@ -644,7 +833,13 @@ $ # rewritten payload      -> signature does not match the payload (rc=2)
 **8. Document the identity file and the agent.**
 *Why:* a `BEGIN PIV YUBIKEY PRIVATE KEY` block that contains no private key, on a machine with no YubiKey, with sentinel serial `0xFFFFFFFF`, is actively misleading. *Why insufficient:* the failure modes are opaque (`error in libcrypto`; `No supported data to decode`; `connecting to pcsc: the Smart card resource manager is not running`), and I had to read Teleport's Go source to discover the agent needs TLS with `cert.pem` and SNI `localhost`. Also document that **only the cert rotates, every 20 minutes, in place** — consumers that cache the cert blob break (Exp 4), and that the bundled X.509 CA is the **host** CA, not the issuer of the leaf.
 
-**9. Optional: bind the workload.** Even a coarse signal (the `command` string, a cgroup, or a caller-supplied purpose string) recorded in a signing audit event would let a reviewer distinguish "the build system signed this" from "something else in the sandbox signed this". Today the attestation is sandbox-level only.
+**9. Let `allowed_signers` express which cluster a CA belongs to.**
+*Why:* a verifier that trusts several Teleport clusters cannot tell them apart with stock OpenSSH. *Why insufficient:* `allowed_signers` has no field for it, so every trusted `cert-authority` line is interchangeable and any trusted tenant's certificate verifies as any other's. I had to key trust by cluster in `beamsig` and accept that the `ssh-keygen` path is strictly less safe. This is really an OpenSSH request, but Teleport could help by documenting the hazard, and by emitting the cluster name in the export in a form tools can bind to (an `allowed_signers` option such as `cluster="..."`, were one to exist).
+
+**10. Make the signing cluster unambiguous in the certificate.**
+*Why:* `teleport-route-to-cluster` is the only cluster name in the credential, and it is a routing hint rather than an assertion of the issuer. *Why insufficient:* it is set by whoever signs, so it cannot be used to distinguish tenants, and in a root/leaf setup it legitimately differs from the signer — which means a verifier cannot even treat a mismatch as an error. An extension naming the *issuing* cluster (or the issuing CA's fingerprint) would let a verifier bind a signature to a tenant without relying on operator-maintained pin labels.
+
+**11. Optional: bind the workload.** Even a coarse signal (the `command` string, a cgroup, or a caller-supplied purpose string) recorded in a signing audit event would let a reviewer distinguish "the build system signed this" from "something else in the sandbox signed this". Today the attestation is sandbox-level only.
 
 ---
 
@@ -688,6 +883,22 @@ $ # rewritten payload      -> signature does not match the payload (rc=2)
 
 19. **`pkill -f <pattern>` matched my own shell** (the pattern appears in the shell's own argv), killing the session mid-command. Not a Beams bug; noting it because it silently destroyed one experiment's state.
 
+20. **git parses only the *first line* of the verify program's output, and demands `ssh-keygen`'s exact wording.** A richer first line such as `Good "git" signature from beam <uuid>` yields `%G?` = `B` — reported as a *bad* signature — while the detail lines print fine under `--show-signature`. The accepted shapes are `Good "git" signature for <principal> with <TYPE> key <FP>` (→ `G`) and `Good "git" signature with <TYPE> key <FP>` (→ `U`). `%GS` is taken from that line, not from `find-principals`. None of this is in `git config` documentation; it came from reading `parse_ssh_output()`. (git 2.39.5.)
+
+21. **git never calls `-Y verify` when `find-principals` finds no match.** It calls `-Y check-novalidate` instead, so a hook in the verify path is silently dead on exactly the case you care about — a commit from an unpinned tenant. Discovered by logging `gpg.ssh.program` argv. (git 2.39.5.)
+
+22. **`tsh beams exec` re-splits its arguments, mangling quoted shell.** `tsh beams exec <beam> -- bash -c 'rm -rf a b c'` produced `rm: missing operand`, and a heredoc passed the same way had its backticks evaluated locally, committing a file with holes in it. Workaround: only ever invoke a script by path, and branch on the caller's side. (Teleport 18.11.2.)
+
+23. **A freshly created beam can have no apt package lists.** `sudo apt-get install -y python3-venv` → `Package 'python3.11-venv' has no installation candidate`, where the same command succeeds on a beam that has been up a while. Needs `apt-get update` first. (Debian 12 beam image.)
+
+24. **`user.signingkey` pointing at a certificate file breaks every ~20 minutes.** `error: Couldn't sign message (signer): agent refused operation?` / `fatal: failed to write commit object`. The cause is not the agent: the certificate rotated, git offered the new blob, and a cached one no longer matched. The error names the wrong component, which is a long way from the real problem. (git 2.39.5 + tbot 18.11.2.)
+
+25. **Packaging with a list of `tar --exclude` paths shipped private keys to another machine.** The excludes missed `exp5/`, where `bin/negative-tests.sh` mints throwaway CA and user keys, and they were copied to a second beam. Disposable keys, no real impact — but a blocklist will always miss something. Fixed by packing from an allowlist (`git ls-files --cached --others --exclude-standard`). The same class of mistake recurred immediately afterwards: `.gitignore` enumerated `exp2/ exp5/ exp6/ …` and so missed `exp-multitenant/`, staging its keys. Now `exp*/`. **Enumerate what you want, never what you do not.**
+
+26. **`except SomeError as e:` unbinds `e` at the end of the block.** Python 3 deletes the name on exit from the `except` clause, so referring to `e` afterwards raises `NameError` — which crashed the new untrusted-tenant reporting path the first time it ran. Capture it into another variable if you need it later. (Python 3.11.2.)
+
+27. **An empty trust store was fatal before discovery could run.** `load_trust_anchors` raised `no SSH CA public keys found`, so the very situation discovery exists to resolve — nothing pinned yet — could never reach it. Also crashed `beamsig trust --list` on a fresh store. My own bug, noted because "fail closed on empty input" is the obvious choice and is wrong when a later step can populate it.
+
 ---
 
 ## 8. Artifacts
@@ -695,9 +906,13 @@ $ # rewritten payload      -> signature does not match the payload (rc=2)
 All committed to this repository (`beamsign`, branch `main`). Run `bin/setup.sh`
 then `bin/start-agent.sh` to reproduce from a clone; see `README.md`.
 
-**Library (`beamsig/`)** — `identity.py` (parse the tbot identity file), `hwagent.py` (hardware key agent client), `wire.py` (SSH wire format), `sshcert.py` (OpenSSH cert parser incl. Teleport extensions), `sshsig.py` (SSHSIG parse/build), `sshcrypto.py` (SSH signature verification), `gitobj.py` (commit payload/signature split), `verify.py` (the beam-aware verifier), `attest.py` (attestation envelope), `sshagentshim.py` (ssh-agent over the hardware agent), `cmssign.py`, `cli.py`.
+**Library (`beamsig/`)** — `identity.py` (parse the tbot identity file), `hwagent.py` (hardware key agent client), `wire.py` (SSH wire format), `sshcert.py` (OpenSSH cert parser incl. Teleport extensions), `sshsig.py` (SSHSIG parse/build), `sshcrypto.py` (SSH signature verification), `gitobj.py` (commit payload/signature split), `verify.py` (the beam-aware verifier, trust anchors, cluster binding), `discover.py` (opt-in TOFU CA pinning), `attest.py` (attestation envelope), `sshagentshim.py` (ssh-agent over the hardware agent), `cmssign.py`, `cli.py`.
 
-**Executables (`bin/`)** — `setup.sh`, `beamsig` (CLI), `beamsig-agent` + `start-agent.sh`, `split-identity.sh`, `inventory.py`, `watch-renewal.py` + `start-watch.sh`, `dissect-sig.py`, `make-allowed-signers.sh`, `negative-tests.sh`, `exp4-renewal.sh` + `exp4-driver.sh` + `start-exp4.sh`, `cms-sign.py`, `exp6-cms.sh`, `beamsig-gpgsm-shim.py`.
+**Install / integration** — `main.sh` (install onto a Beam over `tsh beams scp`/`exec`; creates one if not given), `setup-beamsig.sh` (runs on the Beam: unpack, build, configure, smoke-test, `--uninstall`), `bin/install-global.sh` (beam-wide `~/.gitconfig`, `--trust <cluster>`), `bin/git-beamsig-keygen` (drop-in `gpg.ssh.program`: beam-aware `git log`/`%GS`, pinned-CA and bot-name checks, untrusted-tenant reporting, rotation-proof signing).
+
+**Executables (`bin/`)** — `setup.sh`, `beamsig` (CLI: `sign`, `verify`, `verify-commit`, `attest`, `verify-attestation`, `trust`, `inspect`), `beamsig-agent` + `start-agent.sh`, `split-identity.sh`, `inventory.py`, `watch-renewal.py` + `start-watch.sh`, `dissect-sig.py`, `make-allowed-signers.sh`, `negative-tests.sh` (12 cases), `multitenant-tests.sh` (5 cases incl. cross-tenant spoofing), `exp4-renewal.sh` + `exp4-driver.sh` + `start-exp4.sh`, `cms-sign.py`, `exp6-cms.sh`, `beamsig-gpgsm-shim.py`.
+
+**Docs / demo** — `README.md`, `docs/PRESENTATION-NOTES.md` (hand-off for a UI layer: the JSON contract, the trust model, the three claims a UI must not make, and a GitHub userscript sketch), `demo/record-demo.py` + two asciinema casts + `demo/README.md`.
 
 **Evidence (`logs/`)** — `exp1-inventory.txt`, `exp2-dissect.txt`, `exp5-negative.txt`, `exp6-cms.txt`, `exp4-renewal.txt` (including the post-expiry pass), `renewal.jsonl` (the 4 identity versions, diffed).
 
@@ -705,10 +920,12 @@ then `bin/start-agent.sh` to reproduce from a clone; see `README.md`.
 
 **Vendored (`proto/`)** — `teleport/hardwarekeyagent/v1/hardwarekeyagent_service.proto` and the `beams/v1` protos, from `gravitational/teleport` `branch/v18` (Apache-2.0). gRPC stubs are generated into `gen/` by `bin/setup.sh` and not committed.
 
+**Second beam** — `vapor-jet` (`8bba9461-0638-4a00-9752-c9064f9d832f`) was created from this one, provisioned by copying a single file, and left running. Branch `vapor-jet-demo` on the remote carries a commit it signed; Experiment 10 verifies it from here.
+
 **Deliberately not committed** (see `.gitignore`):
 
 * `archive/`, `inventory/` — copies of the live tbot identity file. They contain the beam's SSH and X.509 certificates plus the owner's email, roles and login IP. No private key can be in them (the beam key is non-exportable), but they are credential files, they trip secret scanners on the `BEGIN PIV YUBIKEY PRIVATE KEY` header, and the certs expire 61 minutes after issue. Recreate with `bin/watch-renewal.py`.
-* `exp5/` — the throwaway CA and user keys the negative tests mint (`rogueca`, `rogueuser`, `forged`, `human`, `otherbot`). Private keys, even disposable ones, should not be committed; `bin/negative-tests.sh` regenerates them on every run.
+* `exp*/` — the throwaway CA and user keys the test scripts mint (`rogueca`, `rogueuser`, `forged`, `human`, `otherbot`, and the simulated second tenant). Private keys, even disposable ones, should not be committed; the test scripts regenerate them on every run. Globbed rather than enumerated, after an enumerated list missed `exp-multitenant/` — see papercut 25.
 * `repos/` — the demo/renewal/x509 git repositories are nested git repos; their transcripts are preserved in `logs/exp4-renewal.txt` instead.
 * `venv/`, `gen/`, `ca/`, `run/` and the `exp*/` scratch directories — all regenerated.
 
