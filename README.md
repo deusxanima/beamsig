@@ -59,16 +59,21 @@ and §6.3.
 
 ### Onto a Beam, from a machine with this checkout
 
+Run after logging in to your Beams cluster with `tsh`:
+
 ```bash
-./main.sh <beam>              # alias or UUID; anything `tsh beams exec` accepts
-./main.sh <beam> --uninstall
+./main.sh                        # create a new Beam, then set up beamsig
+./main.sh daring-lab             # set up an existing Beam (name or UUID)
+./main.sh daring-lab --uninstall
+./main.sh --help
 ```
 
 `main.sh` packs the tree, copies it plus `setup-beamsig.sh` with
 `tsh beams scp`, and runs the setup over `tsh beams exec`. The target Beam needs
 **no git remote credentials and clones nothing** — it only reaches its own
 cluster for the public CA export. The payload is ~82 KB; the virtualenv is built
-on the Beam rather than shipped.
+on the Beam rather than shipped. A newly created Beam can be listed before its
+SSH node registers, so it waits for SSH before copying anything.
 
 It packs from an allowlist (`git ls-files --cached --others --exclude-standard`),
 so local uncommitted edits travel but anything `.gitignore`d stays behind. That
